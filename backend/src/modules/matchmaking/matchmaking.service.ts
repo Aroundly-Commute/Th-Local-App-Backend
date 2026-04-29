@@ -41,6 +41,7 @@ export class MatchmakingService {
         status: RideStatus;
         startPointGeoJson: string;
         endPointGeoJson: string;
+        estimatedPickupTime: Date;
         timeDiffMinutes: number;
         startDistanceMeters: number;
         endDistanceMeters: number;
@@ -71,12 +72,19 @@ export class MatchmakingService {
         r."status",
         ST_AsGeoJSON(r."startPoint") AS "startPointGeoJson",
         ST_AsGeoJSON(r."endPoint") AS "endPointGeoJson",
-        ABS(EXTRACT(EPOCH FROM (r."startTime" - rider.rider_start_time)) / 60.0) AS "timeDiffMinutes",
+        (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second') AS "estimatedPickupTime",
+        ABS(EXTRACT(EPOCH FROM (
+          (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second')
+          - rider.rider_start_time
+        )) / 60.0) AS "timeDiffMinutes",
         ST_Distance(r."routeLine"::geography, rider.rider_start_g) AS "startDistanceMeters",
         ST_Distance(r."routeLine"::geography, rider.rider_end_g) AS "endDistanceMeters",
         ST_Distance(r."routeLine"::geography, rider.rider_line_g) AS "corridorDistanceMeters",
         (
-          ABS(EXTRACT(EPOCH FROM (r."startTime" - rider.rider_start_time)) / 60.0)
+          ABS(EXTRACT(EPOCH FROM (
+            (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second')
+            - rider.rider_start_time
+          )) / 60.0)
           + (ST_Distance(r."routeLine"::geography, rider.rider_start_g) / 1000.0)
           + (ST_Distance(r."routeLine"::geography, rider.rider_end_g) / 1000.0)
           + (ST_Distance(r."routeLine"::geography, rider.rider_line_g) / 2000.0)
@@ -86,11 +94,13 @@ export class MatchmakingService {
       WHERE
         r."status" = ${RideStatus.OPEN}::"RideStatus"
         AND r."seatsAvailable" > 0
-        AND r."startTime" BETWEEN (rider.rider_start_time - (${timeWindowMinutes}::int * INTERVAL '1 minute'))
-                           AND (rider.rider_start_time + (${timeWindowMinutes}::int * INTERVAL '1 minute'))
+        AND (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second') 
+            BETWEEN (rider.rider_start_time - (${timeWindowMinutes}::int * INTERVAL '1 minute'))
+            AND (rider.rider_start_time + (${timeWindowMinutes}::int * INTERVAL '1 minute'))
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_line_g, ${corridorMeters})
+        AND ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry) <= ST_LineLocatePoint(r."routeLine", rider.rider_end_g::geometry)
       ORDER BY score ASC
       LIMIT 50
     `);

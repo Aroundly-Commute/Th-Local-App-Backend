@@ -145,8 +145,11 @@ export default function RiderDashboard() {
               <div style={{ fontSize: 12, color: '#374151', marginTop: 6 }}>
                 {m.startPlaceName} → {m.endPlaceName}
               </div>
-              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 6 }}>
-                time Δ {Number(m.timeDiffMinutes).toFixed(0)} min · start {Number(m.startDistanceMeters).toFixed(0)}m · end {Number(m.endDistanceMeters).toFixed(0)}m
+              <div style={{ fontSize: 12, color: '#16a34a', marginTop: 6, fontWeight: 600 }}>
+                Estimated Pickup ETA: {new Date(m.estimatedPickupTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+              </div>
+              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
+                time Δ {Number(m.timeDiffMinutes).toFixed(0)} min · walk {Number(m.startDistanceMeters).toFixed(0)}m
               </div>
             </button>
           ))}
