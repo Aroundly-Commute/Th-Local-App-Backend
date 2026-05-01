@@ -17,6 +17,8 @@ services:
       context: .
     depends_on:
       - db
+    env_file:
+      - .env
     environment:
       PORT: 3000
       DATABASE_URL: postgresql://carpool:carpool@db:5432/carpool?schema=public

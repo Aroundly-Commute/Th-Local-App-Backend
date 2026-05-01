@@ -1,20 +1,22 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards, Request } from '@nestjs/common';
 import { PublishRideDto } from './dto/publish-ride.dto';
 import { RidesService } from './rides.service';
 import { RideStatus } from '@prisma/client';
+import { FirebaseAuthGuard } from '../auth/firebase-auth.guard';
 
 @Controller('rides')
+@UseGuards(FirebaseAuthGuard)
 export class RidesController {
   constructor(private readonly rides: RidesService) {}
 
   @Post()
-  async publish(@Body() dto: PublishRideDto) {
-    return this.rides.publishRide(dto);
+  async publish(@Request() req, @Body() dto: PublishRideDto) {
+    return this.rides.publishRide(dto, req.user.id);
   }
 
   @Get()
-  async list(@Query('status') status?: RideStatus) {
-    return this.rides.listRides(status);
+  async list(@Request() req, @Query('status') status?: RideStatus) {
+    return this.rides.listRides(status, req.user.id);
   }
 
   @Get(':id')

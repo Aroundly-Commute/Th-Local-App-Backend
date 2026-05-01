@@ -9,7 +9,7 @@ import { PublishRideDto } from './dto/publish-ride.dto';
 export class RidesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async publishRide(dto: PublishRideDto) {
+  async publishRide(dto: PublishRideDto, driverId: string) {
     const startTime = new Date(dto.startTime);
     const endTime = new Date(dto.endTime);
     if (!(startTime instanceof Date) || isNaN(startTime.valueOf())) {
@@ -26,6 +26,34 @@ export class RidesService {
     const endWkt = pointWkt(dto.end);
     const routeWkt = lineStringWkt(dto.route);
 
+    const overlappingDriverRides = await this.prisma.ride.findFirst({
+      where: {
+        driverId,
+        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        startTime: { lt: endTime },
+        endTime: { gt: startTime },
+      }
+    });
+
+    if (overlappingDriverRides) {
+      throw new BadRequestException('You already have a published ride during this time window.');
+    }
+
+    const overlappingRiderRequests = await this.prisma.rideRequest.findFirst({
+      where: {
+        riderId: driverId,
+        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        ride: {
+          startTime: { lt: endTime },
+          endTime: { gt: startTime },
+        }
+      }
+    });
+
+    if (overlappingRiderRequests) {
+      throw new BadRequestException('You already have a requested ride during this time window.');
+    }
+
     const id = randomUUID();
     const now = new Date();
 
@@ -35,7 +63,7 @@ export class RidesService {
         id: string;
         createdAt: Date;
         updatedAt: Date;
-        driverName: string;
+        driverId: string;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -49,15 +77,15 @@ export class RidesService {
       }>
     >(Prisma.sql`
       INSERT INTO "Ride"
-        ("id", "updatedAt", "driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status","startPoint","endPoint","routeLine")
+        ("id", "updatedAt", "driverId","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status","startPoint","endPoint","routeLine")
       VALUES
-        (${id}, ${now}, ${dto.driverName}, ${dto.seatsAvailable}, ${dto.chargeCents}, ${startTime}, ${endTime}, ${dto.startPlaceName}, ${dto.endPlaceName}, ${RideStatus.OPEN}::"RideStatus",
+        (${id}, ${now}, ${driverId}, ${dto.seatsAvailable}, ${dto.chargeCents}, ${startTime}, ${endTime}, ${dto.startPlaceName}, ${dto.endPlaceName}, ${RideStatus.OPEN}::"RideStatus",
          ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
          ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
          ST_SetSRID(ST_GeomFromText(${routeWkt}), 4326)
         )
       RETURNING
-        "id","createdAt","updatedAt","driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
+        "id","createdAt","updatedAt","driverId","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
         ST_AsGeoJSON("startPoint") as "startPointGeoJson",
         ST_AsGeoJSON("endPoint") as "endPointGeoJson",
         ST_AsGeoJSON("routeLine") as "routeGeoJson"
@@ -66,8 +94,11 @@ export class RidesService {
     return rows[0];
   }
 
-  async listRides(status?: RideStatus) {
-    const where = status ? Prisma.sql`WHERE "status" = ${status}::"RideStatus"` : Prisma.empty;
+  async listRides(status?: RideStatus, driverId?: string) {
+    const conditions: Prisma.Sql[] = [];
+    if (status) conditions.push(Prisma.sql`"status" = ${status}::"RideStatus"`);
+    if (driverId) conditions.push(Prisma.sql`"driverId" = ${driverId}`);
+    const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
     return this.prisma.$queryRaw<
       Array<{
         id: string;
@@ -84,7 +115,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        "id","driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
+        "id","driverId" as "driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
         ST_AsGeoJSON("startPoint") as "startPointGeoJson",
         ST_AsGeoJSON("endPoint") as "endPointGeoJson"
       FROM "Ride"
@@ -112,7 +143,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        "id","driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
+        "id","driverId" as "driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
         ST_AsGeoJSON("startPoint") as "startPointGeoJson",
         ST_AsGeoJSON("endPoint") as "endPointGeoJson",
         ST_AsGeoJSON("routeLine") as "routeGeoJson"

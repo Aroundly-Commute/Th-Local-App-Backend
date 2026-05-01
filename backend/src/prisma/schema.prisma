@@ -20,7 +20,8 @@ model Ride {
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
 
-  driverName        String
+  driverId          String
+  driver            User       @relation("DriverRides", fields: [driverId], references: [id])
   seatsAvailable    Int        @default(1)
   chargeCents       Int
 
@@ -53,7 +54,8 @@ model RideRequest {
   rideId         String
   ride           Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
 
-  riderName      String
+  riderId        String
+  rider          User     @relation("RiderRequests", fields: [riderId], references: [id])
   riderStartName String
   riderEndName   String
   riderStartTime DateTime
@@ -64,5 +66,23 @@ model RideRequest {
   status         RideStatus @default(REQUESTED)
 
   @@index([rideId])
+}
+
+model User {
+  id            String        @id @default(uuid())
+  email         String?       @unique
+  name          String
+  firebaseUid   String        @unique
+  phoneNumber   String?       @unique
+  profilePic    String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // A user can post many rides (as a driver)
+  ridesAsDriver Ride[]        @relation("DriverRides")
+
+  // A user can request many rides (as a rider)
+  rideRequests  RideRequest[] @relation("RiderRequests")
 }
 

@@ -95,7 +95,7 @@ export default function RiderDashboard() {
                 });
                 setMatches(res.matches);
               } catch (e: any) {
-                setErr(e?.message ?? 'Search failed');
+                setErr(e?.response?.data?.message ?? e?.message ?? 'Search failed');
               } finally {
                 setLoading(false);
               }
@@ -174,7 +174,7 @@ export default function RiderDashboard() {
                 setRequested(res);
                 listRequests().then(setMyRequests).catch(console.error);
               } catch (e: any) {
-                setErr(e?.message ?? 'Request failed');
+                setErr(e?.response?.data?.message ?? e?.message ?? 'Request failed');
               }
             }}
             style={{

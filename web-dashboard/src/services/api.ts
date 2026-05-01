@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getAuth } from 'firebase/auth';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
 
@@ -6,6 +7,17 @@ export const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 20_000,
 });
+
+api.interceptors.request.use(async (config) => {
+  const auth = getAuth();
+  const user = auth.currentUser;
+  if (user) {
+    const token = await user.getIdToken();
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+}, (error) => Promise.reject(error));
+
 
 export type RideStatus = 'OPEN' | 'REQUESTED' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED';
 

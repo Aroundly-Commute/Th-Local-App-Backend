@@ -114,7 +114,7 @@ export default function DriverDashboard() {
                 const r = await directionsRoute(start.lngLat, end.lngLat);
                 setRoute(r);
               } catch (e: any) {
-                setErr(e?.message ?? 'Failed to get route');
+                setErr(e?.response?.data?.message ?? e?.message ?? 'Failed to get route');
               }
             }}
             style={{
@@ -151,7 +151,7 @@ export default function DriverDashboard() {
                 setPublishedRideId(res.id);
                 listRides().then(setPublishedRides).catch(console.error);
               } catch (e: any) {
-                setErr(e?.message ?? 'Publish failed');
+                setErr(e?.response?.data?.message ?? e?.message ?? 'Publish failed');
               } finally {
                 setPublishing(false);
               }
