@@ -6,9 +6,14 @@ import { SearchMatchesDto } from './dto/search-matches.dto';
 import { pointWkt } from '../../common/utils/geo';
 import { RequestRideDto } from './dto/request-ride.dto';
 
+import { MatchmakingGateway } from './matchmaking.gateway';
+
 @Injectable()
 export class MatchmakingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly gateway: MatchmakingGateway
+  ) {}
 
   async search(dto: SearchMatchesDto, userId: string) {
     const riderStartTime = new Date(dto.startTime);
@@ -226,7 +231,12 @@ export class MatchmakingService {
       select: { id: true },
     });
 
-    return rows[0];
+    const newRequest = rows[0];
+
+    // Notify the driver in real-time
+    this.gateway.notifyUser(ride.driverId, 'new_ride_request', newRequest);
+
+    return newRequest;
   }
 
   async listRequests(rideId?: string, riderId?: string) {
