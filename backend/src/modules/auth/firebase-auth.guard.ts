@@ -1,8 +1,11 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as admin from 'firebase-admin';
 import { PrismaClient } from '@prisma/client';
+import * as jwt from 'jsonwebtoken';
 
 const prisma = new PrismaClient();
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key_123';
+const USE_FIREBASE_AUTH = process.env.USE_FIREBASE_AUTH !== 'false';
 
 @Injectable()
 export class FirebaseAuthGuard implements CanActivate {
@@ -17,31 +20,46 @@ export class FirebaseAuthGuard implements CanActivate {
     const token = authHeader.split('Bearer ')[1];
     
     try {
-      // 1. Verify token with Firebase Admin
-      const decodedToken = await admin.auth().verifyIdToken(token);
-      
-      // 2. Find or create the user in our PostgreSQL Database
-      let user = await prisma.user.findUnique({
-        where: { firebaseUid: decodedToken.uid }
-      });
-      
-      if (!user) {
-        user = await prisma.user.create({
-          data: {
-            firebaseUid: decodedToken.uid,
-            email: decodedToken.email || null,
-            phoneNumber: decodedToken.phone_number || null,
-            name: decodedToken.name || decodedToken.phone_number || 'Carpool User',
-            profilePic: decodedToken.picture || null,
-          }
-        });
+      let decodedLocalToken: any = null;
+      let user: any = null;
+
+      // Check if it's a local JWT
+      try {
+        decodedLocalToken = jwt.verify(token, JWT_SECRET);
+      } catch (e) {
+        // Not a local token, might be a firebase token
       }
+
+      if (decodedLocalToken && decodedLocalToken.sub) {
+        user = await prisma.user.findUnique({ where: { id: decodedLocalToken.sub } });
+      } else if (USE_FIREBASE_AUTH) {
+        // Fallback to Firebase
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        
+        user = await prisma.user.findUnique({
+          where: { firebaseUid: decodedToken.uid }
+        });
+        
+        if (!user) {
+          user = await prisma.user.create({
+            data: {
+              firebaseUid: decodedToken.uid,
+              email: decodedToken.email || null,
+              phoneNumber: decodedToken.phone_number || null,
+              name: decodedToken.name || decodedToken.phone_number || 'Carpool User',
+              profilePic: decodedToken.picture || null,
+            }
+          });
+        }
+      }
+
+      if (!user) throw new UnauthorizedException('User not found');
 
       // 3. Attach user object to the request so controllers can use req.user
       request.user = user;
       return true;
     } catch (error: any) {
-      console.error("Firebase auth error details:", error?.message || error);
+      console.error("Auth error details:", error?.message || error);
       throw new UnauthorizedException('Invalid or expired token');
     }
   }

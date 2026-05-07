@@ -96,13 +96,14 @@ export class RidesService {
 
   async listRides(status?: RideStatus, driverId?: string) {
     const conditions: Prisma.Sql[] = [];
-    if (status) conditions.push(Prisma.sql`"status" = ${status}::"RideStatus"`);
-    if (driverId) conditions.push(Prisma.sql`"driverId" = ${driverId}`);
+    if (status) conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
+    if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
     return this.prisma.$queryRaw<
       Array<{
         id: string;
         driverName: string;
+        driverAvatar: string | null;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -115,12 +116,15 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        "id","driverId" as "driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
-        ST_AsGeoJSON("startPoint") as "startPointGeoJson",
-        ST_AsGeoJSON("endPoint") as "endPointGeoJson"
-      FROM "Ride"
+        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar",
+        r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
+        r."startPlaceName", r."endPlaceName", r."status",
+        ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
+        ST_AsGeoJSON(r."endPoint") as "endPointGeoJson"
+      FROM "Ride" r
+      JOIN "User" u ON r."driverId" = u."id"
       ${where}
-      ORDER BY "startTime" ASC
+      ORDER BY r."startTime" ASC
       LIMIT 200
     `);
   }
@@ -130,6 +134,7 @@ export class RidesService {
       Array<{
         id: string;
         driverName: string;
+        driverAvatar: string | null;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -143,12 +148,15 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        "id","driverId" as "driverName","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
-        ST_AsGeoJSON("startPoint") as "startPointGeoJson",
-        ST_AsGeoJSON("endPoint") as "endPointGeoJson",
-        ST_AsGeoJSON("routeLine") as "routeGeoJson"
-      FROM "Ride"
-      WHERE "id" = ${id}
+        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar",
+        r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
+        r."startPlaceName", r."endPlaceName", r."status",
+        ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
+        ST_AsGeoJSON(r."endPoint") as "endPointGeoJson",
+        ST_AsGeoJSON(r."routeLine") as "routeGeoJson"
+      FROM "Ride" r
+      JOIN "User" u ON r."driverId" = u."id"
+      WHERE r."id" = ${id}
       LIMIT 1
     `);
     if (!rows[0]) throw new NotFoundException('Ride not found');

@@ -96,7 +96,8 @@ export class MatchmakingService {
         )
       SELECT
         r."id",
-        r."driverId" as "driverName",
+        u."name" as "driverName",
+        u."profilePic" as "driverAvatar",
         r."chargeCents",
         r."seatsAvailable",
         r."startTime",
@@ -124,6 +125,7 @@ export class MatchmakingService {
           + (ST_Distance(r."routeLine"::geography, rider.rider_line_g) / 2000.0)
         ) AS score
       FROM "Ride" r
+      JOIN "User" u ON r."driverId" = u."id"
       CROSS JOIN rider
       WHERE
         r."status" = ${RideStatus.OPEN}::"RideStatus"
@@ -250,6 +252,7 @@ export class MatchmakingService {
         id: string;
         rideId: string;
         riderName: string;
+        riderAvatar: string | null;
         riderStartName: string;
         riderEndName: string;
         riderStartTime: Date;
@@ -259,10 +262,11 @@ export class MatchmakingService {
       }>
     >(Prisma.sql`
       SELECT
-        rr."id", rr."rideId", rr."riderId" as "riderName", rr."riderStartName", rr."riderEndName", rr."riderStartTime", rr."status",
+        rr."id", rr."rideId", u."name" as "riderName", u."profilePic" as "riderAvatar", rr."riderStartName", rr."riderEndName", rr."riderStartTime", rr."status",
         ST_AsGeoJSON(rr."riderStart") as "riderStartGeoJson",
         ST_AsGeoJSON(rr."riderEnd") as "riderEndGeoJson"
       FROM "RideRequest" rr
+      JOIN "User" u ON rr."riderId" = u."id"
       ${where}
       ORDER BY rr."createdAt" DESC
       LIMIT 200

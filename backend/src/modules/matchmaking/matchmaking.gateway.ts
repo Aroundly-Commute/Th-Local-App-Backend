@@ -8,8 +8,10 @@ import {
 import { Server, Socket } from 'socket.io';
 import * as admin from 'firebase-admin';
 import { PrismaClient } from '@prisma/client';
+import * as jwt from 'jsonwebtoken';
 
 const prisma = new PrismaClient();
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key_123';
 
 @WebSocketGateway({ cors: true })
 export class MatchmakingGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -28,15 +30,32 @@ export class MatchmakingGateway implements OnGatewayConnection, OnGatewayDisconn
         return;
       }
 
-      // Verify Firebase token
-      const decodedToken = await admin.auth().verifyIdToken(token);
+      let user: any = null;
 
-      // Find user in Prisma
-      const user = await prisma.user.findUnique({
-        where: { firebaseUid: decodedToken.uid },
-      });
+      // 1. Try local JWT
+      try {
+        const decodedLocal: any = jwt.verify(token, JWT_SECRET);
+        if (decodedLocal && decodedLocal.sub) {
+          user = await prisma.user.findUnique({ where: { id: decodedLocal.sub } });
+        }
+      } catch (e) {
+        // Not a local token
+      }
+
+      // 2. Fallback to Firebase
+      if (!user) {
+        try {
+          const decodedToken = await admin.auth().verifyIdToken(token);
+          user = await prisma.user.findUnique({
+            where: { firebaseUid: decodedToken.uid },
+          });
+        } catch (e) {
+          // Not a valid firebase token either
+        }
+      }
 
       if (!user) {
+        console.log(`Socket client ${client.id} failed authentication`);
         client.disconnect();
         return;
       }

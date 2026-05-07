@@ -34,9 +34,9 @@ model Ride {
   // PostGIS geometry (SRID 4326) stored as:
   // - startPoint/endPoint: POINT
   // - routeLine: LINESTRING
-  startPoint        Unsupported("geometry(Point,4326)")
-  endPoint          Unsupported("geometry(Point,4326)")
-  routeLine         Unsupported("geometry(LineString,4326)")
+  startPoint        Unsupported("geometry(Point,4326)")?
+  endPoint          Unsupported("geometry(Point,4326)")?
+  routeLine         Unsupported("geometry(LineString,4326)")?
 
   status            RideStatus @default(OPEN)
 
@@ -60,8 +60,8 @@ model RideRequest {
   riderEndName   String
   riderStartTime DateTime
 
-  riderStart     Unsupported("geometry(Point,4326)")
-  riderEnd       Unsupported("geometry(Point,4326)")
+  riderStart     Unsupported("geometry(Point,4326)")?
+  riderEnd       Unsupported("geometry(Point,4326)")?
 
   status         RideStatus @default(REQUESTED)
 
@@ -75,6 +75,8 @@ model User {
   firebaseUid   String        @unique
   phoneNumber   String?       @unique
   profilePic    String?
+  passwordHash  String?
+  role          String        @default("passenger")
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -84,5 +86,20 @@ model User {
 
   // A user can request many rides (as a rider)
   rideRequests  RideRequest[] @relation("RiderRequests")
+
+  // Messages sent by this user
+  messages      Message[]
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  chatId    String   // rideId:userId or similar
+  text      String
+  createdAt DateTime @default(now())
+
+  senderId  String
+  sender    User     @relation(fields: [senderId], references: [id])
+
+  @@index([chatId])
 }
 
