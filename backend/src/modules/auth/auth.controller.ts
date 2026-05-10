@@ -25,6 +25,7 @@ export class AuthController {
 
   @Post('register')
   async register(@Body() body: any) {
+    console.log(`[AUTH] Registration attempt for email: ${body.email}`);
     const { email, password, name, role } = body;
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) throw new UnauthorizedException('Email already in use');
@@ -33,6 +34,7 @@ export class AuthController {
     // Since firebaseUid is unique, we can generate a mock one for local users
     const mockFirebaseUid = `local_${randomUUID()}`;
 
+    console.log(`[AUTH] Creating user in database for ${email}...`);
     const user = await prisma.user.create({
       data: {
         email,
@@ -42,6 +44,7 @@ export class AuthController {
         firebaseUid: mockFirebaseUid,
       }
     });
+    console.log(`[AUTH] User created successfully. ID: ${user.id}`);
 
     const token = jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
     return { access_token: token, user: this.formatUser(user) };
@@ -49,6 +52,7 @@ export class AuthController {
 
   @Post('login')
   async login(@Body() body: any) {
+    console.log(`[AUTH] Login attempt for email: ${body.email}`);
     const { email, password } = body;
     const user = await prisma.user.findUnique({ where: { email } });
     

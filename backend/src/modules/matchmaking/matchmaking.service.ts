@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SearchMatchesDto } from './dto/search-matches.dto';
 import { pointWkt } from '../../common/utils/geo';
 import { RequestRideDto } from './dto/request-ride.dto';
+import { notifyUserWs } from '../../chat.ws';
 
 import { MatchmakingGateway } from './matchmaking.gateway';
 
@@ -237,6 +238,7 @@ export class MatchmakingService {
 
     // Notify the driver in real-time
     this.gateway.notifyUser(ride.driverId, 'new_ride_request', newRequest);
+    notifyUserWs(ride.driverId, 'new_ride_request', newRequest);
 
     return newRequest;
   }

@@ -6,6 +6,8 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { json, urlencoded } from 'express';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { setupChatWs } from './chat.ws';
 
 import * as admin from 'firebase-admin';
 
@@ -30,6 +32,7 @@ if (process.env.FIREBASE_PROJECT_ID) {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { cors: true });
+  app.useGlobalInterceptors(new LoggingInterceptor());
   app.setGlobalPrefix('api');
 
   app.use(json({ limit: '50mb' }));
@@ -44,7 +47,8 @@ async function bootstrap() {
   );
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3000;
-  await app.listen(port);
+  const server = await app.listen(port);
+  setupChatWs(app.getHttpServer());
 }
 
 bootstrap();

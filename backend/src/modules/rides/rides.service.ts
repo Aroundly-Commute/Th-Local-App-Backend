@@ -94,10 +94,11 @@ export class RidesService {
     return rows[0];
   }
 
-  async listRides(status?: RideStatus, driverId?: string) {
+  async listRides(status?: RideStatus, driverId?: string, excludeDriverId?: string) {
     const conditions: Prisma.Sql[] = [];
     if (status) conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
+    if (excludeDriverId) conditions.push(Prisma.sql`r."driverId" != ${excludeDriverId}`);
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
     return this.prisma.$queryRaw<
       Array<{
@@ -129,10 +130,11 @@ export class RidesService {
     `);
   }
 
-  async getRide(id: string) {
+  async getRide(id: string, userId?: string) {
     const rows = await this.prisma.$queryRaw<
       Array<{
         id: string;
+        driverId: string;
         driverName: string;
         driverAvatar: string | null;
         seatsAvailable: number;
@@ -148,7 +150,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar",
+        r."id", r."driverId", u."name" as "driverName", u."profilePic" as "driverAvatar",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
@@ -160,7 +162,35 @@ export class RidesService {
       LIMIT 1
     `);
     if (!rows[0]) throw new NotFoundException('Ride not found');
-    return rows[0];
+    const ride = rows[0];
+
+    // Include passenger list (for driver view)
+    const requests = await this.prisma.rideRequest.findMany({
+      where: { rideId: id, status: { in: ['REQUESTED', 'ACCEPTED'] as any } },
+      include: { rider: true }
+    });
+    (ride as any).passengers = requests.map(rr => ({
+      request_id: rr.id,
+      rider_id: rr.riderId,
+      rider_name: (rr.rider as any)?.name || 'Passenger',
+      rider_avatar: (rr.rider as any)?.profilePic || null,
+      status: rr.status,
+      chat_id: `chat_${rr.id}`,
+    }));
+
+    // If current user is a rider on this ride, attach their chat_id
+    if (userId && userId !== ride.driverId) {
+      const myRequest = await this.prisma.rideRequest.findFirst({
+        where: { rideId: id, riderId: userId }
+      });
+      if (myRequest) {
+        (ride as any).my_request_id = myRequest.id;
+        (ride as any).my_request_status = myRequest.status;
+        (ride as any).my_chat_id = `chat_${myRequest.id}`;
+      }
+    }
+
+    return ride;
   }
 
   async setRideStatus(id: string, status: RideStatus) {

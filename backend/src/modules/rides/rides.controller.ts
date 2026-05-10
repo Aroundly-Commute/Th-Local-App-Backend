@@ -16,12 +16,12 @@ export class RidesController {
 
   @Get()
   async list(@Request() req, @Query('status') status?: RideStatus) {
-    return this.rides.listRides(status, req.user.id);
+    return this.rides.listRides(status, undefined, req.user.id);
   }
 
   @Get(':id')
-  async get(@Param('id') id: string) {
-    return this.rides.getRide(id);
+  async get(@Request() req, @Param('id') id: string) {
+    return this.rides.getRide(id, req.user.id);
   }
 
   @Patch(':id/status')
@@ -29,4 +29,3 @@ export class RidesController {
     return this.rides.setRideStatus(id, body.status);
   }
 }
-
