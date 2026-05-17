@@ -26,7 +26,6 @@ export class MatchmakingGateway implements OnGatewayConnection, OnGatewayDisconn
         client.handshake.headers?.authorization?.split('Bearer ')[1];
 
       if (!token) {
-        client.disconnect();
         return;
       }
 
@@ -56,7 +55,6 @@ export class MatchmakingGateway implements OnGatewayConnection, OnGatewayDisconn
 
       if (!user) {
         console.log(`Socket client ${client.id} failed authentication`);
-        client.disconnect();
         return;
       }
 
@@ -66,7 +64,6 @@ export class MatchmakingGateway implements OnGatewayConnection, OnGatewayDisconn
       console.log(`Socket client ${client.id} joined room ${roomName}`);
     } catch (error) {
       console.error('Socket authentication failed:', error);
-      client.disconnect();
     }
   }
 

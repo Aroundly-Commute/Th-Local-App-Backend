@@ -7,6 +7,7 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
+import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -19,29 +20,35 @@ export class MarketplaceGateway implements OnGatewayConnection, OnGatewayDisconn
   @WebSocketServer()
   server: Server;
 
+  private readonly logger = new Logger(MarketplaceGateway.name);
+
   constructor(private prisma: PrismaService) {}
 
   handleConnection(client: Socket) {
-    console.log(`Client connected to Marketplace: ${client.id}`);
+    this.logger.log(`[WS] Client connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket) {
-    console.log(`Client disconnected from Marketplace: ${client.id}`);
+    this.logger.log(`[WS] Client disconnected: ${client.id}`);
   }
 
   // Merchant joins a room specific to their shop to receive orders
   @SubscribeMessage('joinShopRoom')
   handleJoinShopRoom(@ConnectedSocket() client: Socket, @MessageBody() shopId: string) {
-    client.join(`shop_${shopId}`);
-    console.log(`Client ${client.id} joined shop room: shop_${shopId}`);
+    const room = `shop_${shopId}`;
+    client.join(room);
+    this.logger.log(`[WS] joinShopRoom: client=${client.id} room=${room}`);
+    const roomSize = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
+    this.logger.log(`[WS] Room ${room} now has ${roomSize} member(s)`);
     return { event: 'joined', data: shopId };
   }
 
-  // Customer joins a room specific to their order or user ID
+  // Customer joins a room specific to their user ID
   @SubscribeMessage('joinCustomerRoom')
   handleJoinCustomerRoom(@ConnectedSocket() client: Socket, @MessageBody() customerId: string) {
-    client.join(`customer_${customerId}`);
-    console.log(`Client ${client.id} joined customer room: customer_${customerId}`);
+    const room = `customer_${customerId}`;
+    client.join(room);
+    this.logger.log(`[WS] joinCustomerRoom: client=${client.id} room=${room}`);
     return { event: 'joined', data: customerId };
   }
 
@@ -51,21 +58,29 @@ export class MarketplaceGateway implements OnGatewayConnection, OnGatewayDisconn
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { shopId: string; customerId: string; items: any[]; totalAmount: number }
   ) {
+    this.logger.log(`[WS] placeOrder from client=${client.id} shopId=${data.shopId} customerId=${data.customerId} total=${data.totalAmount} items=${data.items?.length}`);
+
     let userId = data.customerId;
+
+    // Resolve userId — verify it exists in DB
     const userExists = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!userExists) {
+      this.logger.warn(`[WS] placeOrder: customerId="${userId}" not found in DB, resolving to first user`);
       const firstUser = await this.prisma.user.findFirst();
       if (firstUser) {
         userId = firstUser.id;
       } else {
+        this.logger.warn(`[WS] placeOrder: No users in DB, creating mock customer`);
         const mockUser = await this.prisma.user.create({
           data: { name: 'Mock Customer', firebaseUid: 'mock-customer-' + Date.now(), role: 'passenger' }
         });
         userId = mockUser.id;
       }
+      this.logger.log(`[WS] placeOrder: Resolved userId to ${userId}`);
     }
 
     // Save order in DB
+    this.logger.log(`[WS] placeOrder: Creating order in DB for userId=${userId}`);
     const order = await this.prisma.order.create({
       data: {
         userId: userId,
@@ -81,10 +96,14 @@ export class MarketplaceGateway implements OnGatewayConnection, OnGatewayDisconn
       },
       include: { items: { include: { shopProduct: { include: { product: true } } } }, user: true }
     });
+    this.logger.log(`[WS] placeOrder: Order created id=${order.id}`);
 
-    // Notify Merchant
-    this.server.to(`shop_${data.shopId}`).emit('newOrder', order);
-    
+    // Notify Merchant's room
+    const shopRoom = `shop_${data.shopId}`;
+    const roomSize = this.server.sockets.adapter.rooms.get(shopRoom)?.size ?? 0;
+    this.logger.log(`[WS] placeOrder: Emitting 'newOrder' to room=${shopRoom} (${roomSize} members)`);
+    this.server.to(shopRoom).emit('newOrder', order);
+
     return { event: 'orderPlaced', data: order };
   }
 
@@ -94,16 +113,19 @@ export class MarketplaceGateway implements OnGatewayConnection, OnGatewayDisconn
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { orderId: string; status: 'CONFIRMED' | 'REJECTED' }
   ) {
-    // Update DB
+    this.logger.log(`[WS] updateOrderStatus: client=${client.id} orderId=${data.orderId} status=${data.status}`);
+
     const order = await this.prisma.order.update({
       where: { id: data.orderId },
       data: { status: data.status },
       include: { user: true }
     });
 
-    // Notify Customer
-    this.server.to(`customer_${order.userId}`).emit('orderStatusUpdated', order);
-    
+    const customerRoom = `customer_${order.userId}`;
+    this.logger.log(`[WS] updateOrderStatus: Notifying customer room=${customerRoom}`);
+    this.server.to(customerRoom).emit('orderStatusUpdated', order);
+
+    this.logger.log(`[WS] updateOrderStatus: Done, orderId=${order.id} status=${order.status}`);
     return { event: 'orderUpdated', data: order };
   }
 }
