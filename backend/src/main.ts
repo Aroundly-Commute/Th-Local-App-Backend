@@ -6,6 +6,8 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { json, urlencoded } from 'express';
+import * as express from 'express';
+import * as path from 'path';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { setupChatWs } from './chat.ws';
 
@@ -33,6 +35,10 @@ if (process.env.FIREBASE_PROJECT_ID) {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { cors: true });
   app.useGlobalInterceptors(new LoggingInterceptor());
+  
+  // Serve static files from the uploads directory
+  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
   app.setGlobalPrefix('api');
 
   app.use(json({ limit: '50mb' }));

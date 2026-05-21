@@ -109,4 +109,159 @@ export class MarketplaceService implements OnModuleInit {
       include: { product: true, shop: true }
     });
   }
+
+  // --- Order Methods ---
+
+  async getOrdersForShop(shopId: string) {
+    return this.prisma.order.findMany({
+      where: {
+        items: {
+          some: {
+            shopProduct: {
+              shopId: shopId
+            }
+          }
+        }
+      },
+      include: {
+        items: {
+          include: {
+            shopProduct: {
+              include: {
+                product: true
+              }
+            }
+          }
+        },
+        user: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  async getOrdersForCustomer(userId: string) {
+    return this.prisma.order.findMany({
+      where: { userId },
+      include: {
+        items: {
+          include: {
+            shopProduct: {
+              include: {
+                product: true,
+                shop: true
+              }
+            }
+          }
+        },
+        user: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+  // --- Service Provider Methods ---
+
+  async createServiceProvider(ownerId: string, name: string, services?: string) {
+    return this.prisma.serviceProvider.create({
+      data: {
+        ownerId,
+        name,
+        services,
+      },
+      include: { owner: true }
+    });
+  }
+
+  async getServiceProviders(query: string) {
+    if (!query) return this.prisma.serviceProvider.findMany({ include: { owner: true } });
+    return this.prisma.serviceProvider.findMany({
+      where: {
+        OR: [
+          { name: { contains: query, mode: 'insensitive' } },
+          { services: { contains: query, mode: 'insensitive' } }
+        ]
+      },
+      include: { owner: true }
+    });
+  }
+
+  // --- Service Methods ---
+
+  async addService(providerId: string, data: { name: string; price: number; description?: string; category: string }) {
+    return this.prisma.service.create({
+      data: {
+        providerId,
+        name: data.name,
+        price: data.price,
+        description: data.description,
+        category: data.category,
+      },
+      include: { provider: true }
+    });
+  }
+
+  async searchServices(query: string) {
+    if (!query) return this.prisma.service.findMany({ include: { provider: true } });
+    return this.prisma.service.findMany({
+      where: {
+        OR: [
+          { name: { contains: query, mode: 'insensitive' } },
+          { description: { contains: query, mode: 'insensitive' } },
+          { category: { contains: query, mode: 'insensitive' } }
+        ]
+      },
+      include: { provider: true }
+    });
+  }
+
+  // --- Booking Methods ---
+
+  async createBooking(userId: string, serviceId: string, timeSlot: string, date: string) {
+    return this.prisma.booking.create({
+      data: {
+        userId,
+        serviceId,
+        timeSlot,
+        date,
+      },
+      include: { service: { include: { provider: true } }, user: true }
+    });
+  }
+
+  async getBookingsForUser(userId: string) {
+    return this.prisma.booking.findMany({
+      where: { userId },
+      include: { service: { include: { provider: true } } },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  // --- Order Creation Methods ---
+
+  async createOrder(userId: string, items: Array<{ shopProductId: string; quantity: number; priceAtTime: number }>) {
+    const totalAmount = items.reduce((sum, item) => sum + item.priceAtTime * item.quantity, 0);
+    return this.prisma.order.create({
+      data: {
+        userId,
+        totalAmount,
+        status: 'PENDING',
+        items: {
+          create: items.map(item => ({
+            shopProductId: item.shopProductId,
+            quantity: item.quantity,
+            priceAtTime: item.priceAtTime
+          }))
+        }
+      },
+      include: {
+        items: {
+          include: {
+            shopProduct: {
+              include: { product: true, shop: true }
+            }
+          }
+        },
+        user: true
+      }
+    });
+  }
 }

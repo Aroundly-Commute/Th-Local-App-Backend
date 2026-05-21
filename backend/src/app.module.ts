@@ -6,6 +6,7 @@ import { PrismaModule } from './modules/prisma/prisma.module';
 import { AuthController } from './modules/auth/auth.controller';
 import { AliasController } from './alias.controller';
 import { MarketplaceModule } from './modules/marketplace/marketplace.module';
+import { StorageModule } from './modules/storage/storage.module';
 
 @Module({
   imports: [
@@ -14,8 +15,8 @@ import { MarketplaceModule } from './modules/marketplace/marketplace.module';
     RidesModule,
     MatchmakingModule,
     MarketplaceModule,
+    StorageModule,
   ],
   controllers: [AuthController, AliasController],
 })
 export class AppModule {}
-

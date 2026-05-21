@@ -61,11 +61,12 @@ export class MarketplaceGateway implements OnGatewayConnection, OnGatewayDisconn
     this.logger.log(`[WS] placeOrder from client=${client.id} shopId=${data.shopId} customerId=${data.customerId} total=${data.totalAmount} items=${data.items?.length}`);
 
     let userId = data.customerId;
+    const isValidUuid = typeof userId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
 
     // Resolve userId — verify it exists in DB
-    const userExists = await this.prisma.user.findUnique({ where: { id: userId } });
+    const userExists = isValidUuid ? await this.prisma.user.findUnique({ where: { id: userId } }) : null;
     if (!userExists) {
-      this.logger.warn(`[WS] placeOrder: customerId="${userId}" not found in DB, resolving to first user`);
+      this.logger.warn(`[WS] placeOrder: customerId="${userId}" not found in DB or invalid UUID, resolving to first user`);
       const firstUser = await this.prisma.user.findFirst();
       if (firstUser) {
         userId = firstUser.id;
