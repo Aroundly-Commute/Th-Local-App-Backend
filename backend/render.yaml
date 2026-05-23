@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: carpool-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render auto-detects PORT from process.env.PORT
+    # Health check endpoint
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false   # Set manually in Render dashboard (Supabase connection string)
+      - key: JWT_SECRET
+        sync: false   # Set manually in Render dashboard
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false   # Set manually in Render dashboard
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: USE_FIREBASE_AUTH
+        value: "false"
+      - key: MEILI_HOST
+        sync: false   # Set to your Meilisearch Render URL
+      - key: MEILI_MASTER_KEY
+        sync: false

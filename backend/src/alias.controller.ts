@@ -7,6 +7,7 @@ import { broadcastToChat, notifyUserWs } from './chat.ws';
 
 const prisma = new PrismaClient();
 const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN || '';
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 
 @Controller()
 @UseGuards(FirebaseAuthGuard)
@@ -51,19 +52,55 @@ export class AliasController {
 
   @Get('locations/suggest')
   async suggestLocations(@Query('q') q: string) {
-    if (!MAPBOX_TOKEN || !q || q.length < 3) return [];
+    if (!GOOGLE_MAPS_API_KEY || !q || q.length < 3) return [];
     try {
-      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json?access_token=${MAPBOX_TOKEN}&limit=5&types=place,address,poi&country=in&proximity=77.3910,28.5355`;
+      const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(q)}&key=${GOOGLE_MAPS_API_KEY}`;
       const response = await fetch(url);
       const data = await response.json();
-      const features = data.features || [];
-      return features.map((f: any) => ({
-        id: f.id,
-        place_name: f.place_name,
-        center: f.center,
+      const predictions = data.predictions || [];
+      return predictions.map((p: any) => ({
+        id: p.place_id,
+        place_name: p.description,
       }));
     } catch (e) {
       return [];
+    }
+  }
+
+  @Get('locations/details')
+  async getLocationDetails(@Query('place_id') placeId: string) {
+    if (!GOOGLE_MAPS_API_KEY || !placeId) return { error: 'Missing parameters' };
+    try {
+      const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=geometry&key=${GOOGLE_MAPS_API_KEY}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      if (data.result && data.result.geometry && data.result.geometry.location) {
+        return {
+          lat: data.result.geometry.location.lat,
+          lng: data.result.geometry.location.lng,
+        };
+      }
+      return { error: 'No geometry found' };
+    } catch (e) {
+      return { error: e.message };
+    }
+  }
+
+  @Get('locations/directions')
+  async getDirections(
+    @Query('origin') origin: string,
+    @Query('destination') destination: string
+  ) {
+    if (!GOOGLE_MAPS_API_KEY || !origin || !destination) {
+      return { error: 'Missing parameters' };
+    }
+    try {
+      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&key=${GOOGLE_MAPS_API_KEY}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      return data;
+    } catch (e) {
+      return { error: e.message };
     }
   }
 
@@ -170,7 +207,8 @@ export class AliasController {
         await prisma.$executeRaw(Prisma.sql`
           UPDATE "Ride"
           SET "startPoint" = ST_SetSRID(ST_MakePoint(${startCoords[0]}, ${startCoords[1]}), 4326),
-              "endPoint" = ST_SetSRID(ST_MakePoint(${endCoords[0]}, ${endCoords[1]}), 4326)
+              "endPoint" = ST_SetSRID(ST_MakePoint(${endCoords[0]}, ${endCoords[1]}), 4326),
+              "routeLine" = ST_SetSRID(ST_MakeLine(ST_MakePoint(${startCoords[0]}, ${startCoords[1]}), ST_MakePoint(${endCoords[0]}, ${endCoords[1]})), 4326)
           WHERE id = ${ride.id}
         `);
       }

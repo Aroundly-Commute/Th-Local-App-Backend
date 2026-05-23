@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+*.log
+npm-debug.log*
+.nyc_output
+coverage
+.DS_Store
+
+# Local docker volumes
+postgres-init
+
+# IDE
+.vscode
+.idea
