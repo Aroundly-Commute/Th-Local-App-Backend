@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SearchMatchesDto } from './dto/search-matches.dto';
 import { pointWkt } from '../../common/utils/geo';
 import { RequestRideDto } from './dto/request-ride.dto';
-import { notifyUserWs } from '../../chat.ws';
+import { ChatService } from '../chat/chat.service';
 
 import { MatchmakingGateway } from './matchmaking.gateway';
 
@@ -13,7 +13,8 @@ import { MatchmakingGateway } from './matchmaking.gateway';
 export class MatchmakingService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly gateway: MatchmakingGateway
+    private readonly gateway: MatchmakingGateway,
+    private readonly chatService: ChatService,
   ) {}
 
   async search(dto: SearchMatchesDto, userId: string) {
@@ -238,7 +239,7 @@ export class MatchmakingService {
 
     // Notify the driver in real-time
     this.gateway.notifyUser(ride.driverId, 'new_ride_request', newRequest);
-    notifyUserWs(ride.driverId, 'new_ride_request', newRequest);
+    this.chatService.notifyUserWs(ride.driverId, 'new_ride_request', newRequest);
 
     return newRequest;
   }

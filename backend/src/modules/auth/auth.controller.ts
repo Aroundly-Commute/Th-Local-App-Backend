@@ -1,15 +1,15 @@
 import { Controller, Post, Body, UnauthorizedException, Get, Request, UseGuards } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
 import { FirebaseAuthGuard } from './firebase-auth.guard';
+import { PrismaService } from '../prisma/prisma.service';
 
-const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key_123';
 
 @Controller('auth')
 export class AuthController {
+  constructor(private readonly prisma: PrismaService) {}
   
   private formatUser(user: any) {
     return {
@@ -27,7 +27,7 @@ export class AuthController {
   async register(@Body() body: any) {
     console.log(`[AUTH] Registration attempt for email: ${body.email}`);
     const { email, password, name, role } = body;
-    const existing = await prisma.user.findUnique({ where: { email } });
+    const existing = await this.prisma.user.findUnique({ where: { email } });
     if (existing) throw new UnauthorizedException('Email already in use');
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -35,7 +35,7 @@ export class AuthController {
     const mockFirebaseUid = `local_${randomUUID()}`;
 
     console.log(`[AUTH] Creating user in database for ${email}...`);
-    const user = await prisma.user.create({
+    const user = await this.prisma.user.create({
       data: {
         email,
         name,
@@ -54,7 +54,7 @@ export class AuthController {
   async login(@Body() body: any) {
     console.log(`[AUTH] Login attempt for email: ${body.email}`);
     const { email, password } = body;
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await this.prisma.user.findUnique({ where: { email } });
     
     if (!user || !user.passwordHash) {
       throw new UnauthorizedException('Invalid email or password');

@@ -9,7 +9,7 @@ import { json, urlencoded } from 'express';
 import * as express from 'express';
 import * as path from 'path';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
-import { setupChatWs } from './chat.ws';
+import { ChatGateway } from './modules/chat/chat.gateway';
 
 import * as admin from 'firebase-admin';
 
@@ -54,7 +54,10 @@ async function bootstrap() {
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3000;
   const server = await app.listen(port);
-  setupChatWs(app.getHttpServer());
+  
+  // Retrieve the modular WebSocket gateway and bind it to the HTTP server
+  const chatGateway = app.get(ChatGateway);
+  chatGateway.setupChatWs(app.getHttpServer());
 }
 
 bootstrap();

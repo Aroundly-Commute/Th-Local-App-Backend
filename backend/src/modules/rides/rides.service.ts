@@ -4,10 +4,14 @@ import { Prisma, RideStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { lineStringWkt, pointWkt } from '../../common/utils/geo';
 import { PublishRideDto } from './dto/publish-ride.dto';
+import { ChatService } from '../chat/chat.service';
 
 @Injectable()
 export class RidesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly chatService: ChatService,
+  ) {}
 
   async publishRide(dto: PublishRideDto, driverId: string) {
     const startTime = new Date(dto.startTime);
@@ -57,7 +61,6 @@ export class RidesService {
     const id = randomUUID();
     const now = new Date();
 
-    // Insert via raw SQL because PostGIS geometry is Unsupported in Prisma.
     const rows = await this.prisma.$queryRaw<
       Array<{
         id: string;
@@ -164,7 +167,6 @@ export class RidesService {
     if (!rows[0]) throw new NotFoundException('Ride not found');
     const ride = rows[0];
 
-    // Include passenger list (for driver view)
     const requests = await this.prisma.rideRequest.findMany({
       where: { rideId: id, status: { in: ['REQUESTED', 'ACCEPTED'] as any } },
       include: { rider: true }
@@ -178,7 +180,6 @@ export class RidesService {
       chat_id: `chat_${rr.id}`,
     }));
 
-    // If current user is a rider on this ride, attach their chat_id
     if (userId && userId !== ride.driverId) {
       const myRequest = await this.prisma.rideRequest.findFirst({
         where: { rideId: id, riderId: userId }
@@ -201,5 +202,220 @@ export class RidesService {
     });
     return updated;
   }
-}
 
+  async getMyRides(userId: string) {
+    const driverRides = await this.prisma.ride.findMany({ 
+      where: { driverId: userId },
+      include: { 
+        driver: true,
+        requests: { include: { rider: true } }
+      } 
+    });
+
+    const riderRequests = await this.prisma.rideRequest.findMany({
+      where: { riderId: userId },
+      include: { ride: { include: { driver: true } } }
+    });
+
+    const upcoming: any[] = [];
+    const past: any[] = [];
+    const requested: any[] = [];
+
+    driverRides.forEach(r => {
+      const mapped = this.mapDriverRide(r, userId);
+      if (r.status === 'CANCELLED' || r.startTime < new Date()) {
+        past.push(mapped);
+      } else {
+        upcoming.push(mapped);
+      }
+    });
+
+    riderRequests.forEach(rr => {
+      const mapped = this.mapRiderRequest(rr);
+      if (rr.status === 'ACCEPTED') {
+        if (rr.ride.startTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+          upcoming.push(mapped);
+        } else {
+          past.push(mapped);
+        }
+      } else if (rr.status === 'REQUESTED') {
+        requested.push(mapped);
+      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
+        past.push(mapped);
+      }
+    });
+
+    upcoming.sort((a, b) => new Date(a.departure_time).getTime() - new Date(b.departure_time).getTime());
+    past.sort((a, b) => new Date(b.departure_time).getTime() - new Date(a.departure_time).getTime());
+
+    return { upcoming, past, requested };
+  }
+
+  async offerRide(body: any, userId: string) {
+    const { startName, endName, startCoords, endCoords, seats, price, date, time } = body;
+    const startTime = new Date(`${date}T${time}:00+05:30`);
+    const endTime = new Date(startTime.getTime() + 60 * 60 * 1000); // add 1 hr approx
+
+    console.log(`[OfferRide Service] Local Time: ${date} ${time} | Calculated UTC: ${startTime.toISOString()}`);
+
+    const overlappingDriver = await this.prisma.ride.findFirst({
+       where: {
+         driverId: userId,
+         status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+         startTime: { lt: endTime },
+         endTime: { gt: startTime }
+       }
+    });
+    if (overlappingDriver) throw new BadRequestException('You already have a published ride during this time window.');
+
+    const overlappingRider = await this.prisma.rideRequest.findFirst({
+       where: {
+         riderId: userId,
+         status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+         ride: {
+           startTime: { lt: endTime },
+           endTime: { gt: startTime }
+         }
+       }
+    });
+    if (overlappingRider) throw new BadRequestException('You already have a requested ride during this time window.');
+
+    const ride = await this.prisma.ride.create({
+      data: {
+        driverId: userId,
+        seatsAvailable: seats || 3,
+        chargeCents: (price || 10) * 100,
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString(),
+        startPlaceName: startName,
+        endPlaceName: endName,
+        status: RideStatus.OPEN,
+      }
+    });
+
+    if (startCoords && startCoords.length === 2 && endCoords && endCoords.length === 2) {
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "Ride"
+        SET "startPoint" = ST_SetSRID(ST_MakePoint(${startCoords[0]}, ${startCoords[1]}), 4326),
+            "endPoint" = ST_SetSRID(ST_MakePoint(${endCoords[0]}, ${endCoords[1]}), 4326),
+            "routeLine" = ST_SetSRID(ST_MakeLine(ST_MakePoint(${startCoords[0]}, ${startCoords[1]}), ST_MakePoint(${endCoords[0]}, ${endCoords[1]})), 4326)
+        WHERE id = ${ride.id}
+      `);
+    }
+
+    return ride;
+  }
+
+  async bookRide(id: string, userId: string) {
+    const ride = await this.prisma.ride.findUnique({ where: { id } });
+    if (!ride) throw new NotFoundException('Ride not found');
+
+    if (ride.driverId === userId) {
+      throw new BadRequestException('Cannot book your own ride');
+    }
+
+    const overlappingDriver = await this.prisma.ride.findFirst({
+       where: {
+         driverId: userId,
+         status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+         startTime: { lt: ride.endTime },
+         endTime: { gt: ride.startTime }
+       }
+    });
+    if (overlappingDriver) throw new BadRequestException('You have a published ride overlapping with this time window.');
+
+    const overlappingRider = await this.prisma.rideRequest.findFirst({
+       where: {
+         riderId: userId,
+         status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+         ride: {
+           startTime: { lt: ride.endTime },
+           endTime: { gt: ride.startTime }
+         }
+       }
+    });
+    if (overlappingRider) throw new BadRequestException('You already have a requested ride overlapping with this time window.');
+
+    const requestId = await this.prisma.rideRequest.create({
+      data: {
+        rideId: id,
+        riderId: userId,
+        riderStartName: ride.startPlaceName,
+        riderEndName: ride.endPlaceName,
+        riderStartTime: ride.startTime,
+        status: RideStatus.REQUESTED
+      },
+      include: {
+        rider: true,
+      }
+    });
+
+    this.chatService.notifyUserWs(ride.driverId, 'new_ride_request', {
+      id: requestId.id,
+      rideId: ride.id,
+      riderName: requestId.rider.name,
+      riderStartName: requestId.riderStartName,
+      riderEndName: requestId.riderEndName,
+      riderStartTime: requestId.riderStartTime,
+      status: requestId.status
+    });
+
+    return { ok: true, chat_id: `chat_${requestId.id}` };
+  }
+
+  private mapDriverRide(r: any, userId: string) {
+    const acceptedPassengers = (r.requests || []).filter((rr: any) =>
+      rr.status === 'ACCEPTED' || rr.status === 'REQUESTED'
+    );
+    const firstPassenger = acceptedPassengers[0];
+    const chat_id = firstPassenger ? `chat_${firstPassenger.id}` : null;
+    const peer_name = firstPassenger ? firstPassenger.rider?.name : null;
+
+    return {
+      id: r.id,
+      role: 'driver',
+      driver_id: r.driverId,
+      driver_name: r.driver?.name || 'Driver',
+      driver_avatar: r.driver?.profilePic || null,
+      driver_rating: 5.0,
+      origin: r.startPlaceName,
+      destination: r.endPlaceName,
+      departure_time: r.startTime.toISOString(),
+      seats_available: r.seatsAvailable,
+      price_per_seat: r.chargeCents / 100,
+      status: r.status,
+      passengers: acceptedPassengers.map((rr: any) => ({
+        request_id: rr.id,
+        rider_id: rr.riderId,
+        rider_name: rr.rider?.name || 'Passenger',
+        rider_avatar: rr.rider?.profilePic || null,
+        status: rr.status,
+        chat_id: `chat_${rr.id}`,
+      })),
+      chat_id,
+      peer_name,
+    };
+  }
+
+  private mapRiderRequest(rr: any) {
+    const r = rr.ride;
+    return {
+      id: r.id,
+      request_id: rr.id,
+      role: 'rider',
+      request_status: rr.status,
+      driver_id: r.driverId,
+      driver_name: r.driver?.name || 'Driver',
+      driver_avatar: r.driver?.profilePic || null,
+      driver_rating: 5.0,
+      origin: rr.riderStartName || r.startPlaceName,
+      destination: rr.riderEndName || r.endPlaceName,
+      departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
+      seats_available: r.seatsAvailable,
+      price_per_seat: r.chargeCents / 100,
+      status: r.status,
+      chat_id: `chat_${rr.id}`,
+      peer_name: r.driver?.name || 'Driver',
+    };
+  }
+}
