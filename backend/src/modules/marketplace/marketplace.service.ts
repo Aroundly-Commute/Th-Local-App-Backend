@@ -41,12 +41,16 @@ export class MarketplaceService implements OnModuleInit {
     });
 
     // Index in Meilisearch
-    await this.meiliClient.index('shops').addDocuments([{
-      id: shop.id,
-      name: shop.name,
-      description: shop.description,
-      ownerName: shop.owner.name,
-    }]);
+    try {
+      await this.meiliClient.index('shops').addDocuments([{
+        id: shop.id,
+        name: shop.name,
+        description: shop.description,
+        ownerName: shop.owner.name,
+      }]);
+    } catch (error) {
+      console.error('Failed to index shop in Meilisearch:', error.message);
+    }
 
     return shop;
   }
@@ -54,13 +58,26 @@ export class MarketplaceService implements OnModuleInit {
   async getShops(query: string) {
     if (!query) return this.prisma.shop.findMany({ include: { owner: true } });
     
-    const searchResults = await this.meiliClient.index('shops').search(query);
-    const shopIds = searchResults.hits.map(h => h.id as string);
+    try {
+      const searchResults = await this.meiliClient.index('shops').search(query);
+      const shopIds = searchResults.hits.map(h => h.id as string);
 
-    return this.prisma.shop.findMany({
-      where: { id: { in: shopIds } },
-      include: { owner: true }
-    });
+      return this.prisma.shop.findMany({
+        where: { id: { in: shopIds } },
+        include: { owner: true }
+      });
+    } catch (error) {
+      console.error('Meilisearch search failed, falling back to database query:', error.message);
+      return this.prisma.shop.findMany({
+        where: {
+          OR: [
+            { name: { contains: query, mode: 'insensitive' } },
+            { description: { contains: query, mode: 'insensitive' } }
+          ]
+        },
+        include: { owner: true }
+      });
+    }
   }
 
   // --- Product Methods ---
@@ -91,14 +108,18 @@ export class MarketplaceService implements OnModuleInit {
     });
 
     // 3. Index in Meilisearch
-    await this.meiliClient.index('products').addDocuments([{
-      id: shopProduct.id,
-      name: product.name,
-      description: data.description || product.description,
-      price: data.price,
-      imageUrl: product.imageUrl,
-      shopName: shopProduct.shop.name,
-    }]);
+    try {
+      await this.meiliClient.index('products').addDocuments([{
+        id: shopProduct.id,
+        name: product.name,
+        description: data.description || product.description,
+        price: data.price,
+        imageUrl: product.imageUrl,
+        shopName: shopProduct.shop.name,
+      }]);
+    } catch (error) {
+      console.error('Failed to index product in Meilisearch:', error.message);
+    }
 
     return shopProduct;
   }
@@ -106,13 +127,26 @@ export class MarketplaceService implements OnModuleInit {
   async searchProducts(query: string) {
     if (!query) return this.prisma.shopProduct.findMany({ include: { product: true, shop: true } });
 
-    const searchResults = await this.meiliClient.index('products').search(query);
-    const shopProductIds = searchResults.hits.map(h => h.id as string);
+    try {
+      const searchResults = await this.meiliClient.index('products').search(query);
+      const shopProductIds = searchResults.hits.map(h => h.id as string);
 
-    return this.prisma.shopProduct.findMany({
-      where: { id: { in: shopProductIds } },
-      include: { product: true, shop: true }
-    });
+      return this.prisma.shopProduct.findMany({
+        where: { id: { in: shopProductIds } },
+        include: { product: true, shop: true }
+      });
+    } catch (error) {
+      console.error('Meilisearch search failed, falling back to database query:', error.message);
+      return this.prisma.shopProduct.findMany({
+        where: {
+          OR: [
+            { product: { name: { contains: query, mode: 'insensitive' } } },
+            { product: { description: { contains: query, mode: 'insensitive' } } }
+          ]
+        },
+        include: { product: true, shop: true }
+      });
+    }
   }
 
   // --- Order Methods ---
