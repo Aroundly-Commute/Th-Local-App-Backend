@@ -14,13 +14,18 @@ export class MarketplaceService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // Ensure indexes exist
-    await this.meiliClient.index('products').updateSettings({
-      searchableAttributes: ['name', 'description', 'shopName'],
-    });
-    await this.meiliClient.index('shops').updateSettings({
-      searchableAttributes: ['name', 'description', 'ownerName'],
-    });
+    try {
+      // Ensure indexes exist
+      await this.meiliClient.index('products').updateSettings({
+        searchableAttributes: ['name', 'description', 'shopName'],
+      });
+      await this.meiliClient.index('shops').updateSettings({
+        searchableAttributes: ['name', 'description', 'ownerName'],
+      });
+      console.log('Meilisearch indexes initialized.');
+    } catch (error) {
+      console.error('Failed to initialize Meilisearch on startup (it may be booting up):', error.message);
+    }
   }
 
   // --- Shop Methods ---
