@@ -8,6 +8,7 @@ import { AliasController } from './alias.controller';
 import { MarketplaceModule } from './modules/marketplace/marketplace.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { ParkingModule } from './modules/parking/parking.module';
+import { AppController } from './app.controller';
 
 @Module({
   imports: [
@@ -19,6 +20,6 @@ import { ParkingModule } from './modules/parking/parking.module';
     StorageModule,
     ParkingModule,
   ],
-  controllers: [AuthController, AliasController],
+  controllers: [AuthController, AliasController, AppController],
 })
 export class AppModule {}
