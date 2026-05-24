@@ -283,7 +283,7 @@ export class MatchmakingService {
 
     const req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
-      select: { id: true, rideId: true, status: true },
+      select: { id: true, rideId: true, status: true, riderId: true },
     });
     if (!req) throw new NotFoundException('Request not found');
 
@@ -299,6 +299,10 @@ export class MatchmakingService {
       data: { status },
       select: { id: true },
     });
+
+    // Notify the rider in real-time
+    this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+    this.chatService.notifyUserWs(req.riderId, 'ride_request_updated', updatedReq);
 
     return updatedReq;
   }

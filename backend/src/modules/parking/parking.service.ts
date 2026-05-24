@@ -1,10 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ParkingSlotType, BookingStatus } from '@prisma/client';
+import { ChatService } from '../chat/chat.service';
 
 @Injectable()
 export class ParkingService implements OnModuleInit {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly chatService: ChatService,
+  ) {}
 
   // Automatically seed the 90 spots on startup if they don't exist
   async onModuleInit() {
@@ -215,6 +219,14 @@ export class ParkingService implements OnModuleInit {
       }
     }
 
+    // Notify the visitor who made the booking request
+    this.chatService.notifyUserWs(booking.userId, 'parking_booking_status_updated', {
+      id: updatedBooking.id,
+      spotId: updatedBooking.spotId,
+      spotName: booking.spot.spotName,
+      status: updatedBooking.status,
+    });
+
     return updatedBooking;
   }
 
@@ -233,11 +245,8 @@ export class ParkingService implements OnModuleInit {
         owner: {
           select: { name: true, email: true, phoneNumber: true },
         },
-        availabilities: {
-          where: { date, slotType },
-        },
+        availabilities: true,
         bookings: {
-          where: { date, slotType },
           include: {
             user: {
               select: { id: true, name: true, email: true },
@@ -290,7 +299,7 @@ export class ParkingService implements OnModuleInit {
     }
 
     // Create the booking request (starts in REQUESTED status)
-    return this.prisma.parkingBooking.create({
+    const booking = await this.prisma.parkingBooking.create({
       data: {
         spotId: dto.spotId,
         availabilityId: dto.availabilityId || null,
@@ -303,6 +312,30 @@ export class ParkingService implements OnModuleInit {
         status: BookingStatus.REQUESTED,
       },
     });
+
+    // Notify the spot owner in real-time
+    const spot = await this.prisma.parkingSpot.findUnique({
+      where: { id: dto.spotId },
+      select: { ownerId: true, spotName: true },
+    });
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true },
+    });
+
+    if (spot && spot.ownerId) {
+      this.chatService.notifyUserWs(spot.ownerId, 'new_parking_booking_request', {
+        id: booking.id,
+        spotId: booking.spotId,
+        spotName: spot.spotName,
+        visitorName: user?.name || 'A visitor',
+        date: booking.date,
+        status: booking.status,
+      });
+    }
+
+    return booking;
   }
 
   // Fetch all bookings/tickets placed by the logged-in passenger
