@@ -155,6 +155,14 @@ export class ParkingService implements OnModuleInit {
 
   // Fetch all booking requests made to the owner's spots
   async getMySpotRequests(userId: string) {
+    // Delete expired pending requests
+    await this.prisma.parkingBooking.deleteMany({
+      where: {
+        status: BookingStatus.REQUESTED,
+        endTime: { lt: new Date() },
+      },
+    });
+
     return this.prisma.parkingBooking.findMany({
       where: {
         spot: { ownerId: userId },
@@ -212,7 +220,15 @@ export class ParkingService implements OnModuleInit {
 
   // Fetch the current grid state of all 90 spots with their availability and bookings
   async getParkingGridState(date: string, slotType: ParkingSlotType) {
-    return this.prisma.parkingSpot.findMany({
+    // Delete expired pending requests
+    await this.prisma.parkingBooking.deleteMany({
+      where: {
+        status: BookingStatus.REQUESTED,
+        endTime: { lt: new Date() },
+      },
+    });
+
+    const spots = await this.prisma.parkingSpot.findMany({
       include: {
         owner: {
           select: { name: true, email: true, phoneNumber: true },
@@ -231,6 +247,17 @@ export class ParkingService implements OnModuleInit {
       },
       orderBy: { spotName: 'asc' },
     });
+
+    const now = new Date();
+    return spots.map((s) => ({
+      ...s,
+      bookings: s.bookings.map((b) => {
+        if (b.status === BookingStatus.ACCEPTED && b.endTime < now) {
+          return { ...b, status: 'EXPIRED' as any };
+        }
+        return b;
+      }),
+    }));
   }
 
   // Request a booking for a spot
@@ -280,7 +307,16 @@ export class ParkingService implements OnModuleInit {
 
   // Fetch all bookings/tickets placed by the logged-in passenger
   async getMyBookings(userId: string) {
-    return this.prisma.parkingBooking.findMany({
+    // Delete expired pending requests
+    await this.prisma.parkingBooking.deleteMany({
+      where: {
+        userId,
+        status: BookingStatus.REQUESTED,
+        endTime: { lt: new Date() },
+      },
+    });
+
+    const bookings = await this.prisma.parkingBooking.findMany({
       where: { userId },
       include: {
         spot: {
@@ -292,6 +328,14 @@ export class ParkingService implements OnModuleInit {
         },
       },
       orderBy: { createdAt: 'desc' },
+    });
+
+    const now = new Date();
+    return bookings.map((bk) => {
+      if (bk.status === BookingStatus.ACCEPTED && bk.endTime < now) {
+        return { ...bk, status: 'EXPIRED' as any };
+      }
+      return bk;
     });
   }
 }

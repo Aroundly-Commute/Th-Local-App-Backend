@@ -102,6 +102,10 @@ export class RidesService {
     if (status) conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
     if (excludeDriverId) conditions.push(Prisma.sql`r."driverId" != ${excludeDriverId}`);
+    
+    // Only list rides that have not passed their start time
+    conditions.push(Prisma.sql`r."startTime" >= NOW()`);
+
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
     return this.prisma.$queryRaw<
       Array<{
@@ -232,14 +236,19 @@ export class RidesService {
 
     riderRequests.forEach(rr => {
       const mapped = this.mapRiderRequest(rr);
+      const rideStartTime = rr.riderStartTime || rr.ride.startTime;
       if (rr.status === 'ACCEPTED') {
-        if (rr.ride.startTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
           upcoming.push(mapped);
         } else {
           past.push(mapped);
         }
       } else if (rr.status === 'REQUESTED') {
-        requested.push(mapped);
+        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+          requested.push(mapped);
+        } else {
+          past.push(mapped);
+        }
       } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
         past.push(mapped);
       }
