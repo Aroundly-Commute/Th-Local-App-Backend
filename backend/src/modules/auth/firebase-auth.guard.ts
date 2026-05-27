@@ -41,13 +41,18 @@ export class FirebaseAuthGuard implements CanActivate {
         });
         
         if (!user) {
+          // Extract custom headers sent during first-time signup sync
+          const requestedRole = request.headers['x-user-role'] || 'passenger';
+          const requestedName = request.headers['x-user-name'] || decodedToken.name || decodedToken.phone_number || 'Carpool User';
+
           user = await prisma.user.create({
             data: {
               firebaseUid: decodedToken.uid,
               email: decodedToken.email || null,
               phoneNumber: decodedToken.phone_number || null,
-              name: decodedToken.name || decodedToken.phone_number || 'Carpool User',
+              name: requestedName,
               profilePic: decodedToken.picture || null,
+              role: requestedRole,
             }
           });
         }
