@@ -90,6 +90,8 @@ export class MatchmakingService {
           SELECT
             ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography AS rider_start_g,
             ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography AS rider_end_g,
+            ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geometry AS rider_start_geom,
+            ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geometry AS rider_end_geom,
             ST_MakeLine(
               ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
               ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)
@@ -113,9 +115,9 @@ export class MatchmakingService {
         r."vehicleCapacity",
         r."fuelType",
         r."vehicleNumber",
-        (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second') AS "estimatedPickupTime",
+        (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom)) * INTERVAL '1 second') AS "estimatedPickupTime",
         ABS(EXTRACT(EPOCH FROM (
-          (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second')
+          (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom)) * INTERVAL '1 second')
           - rider.rider_start_time
         )) / 60.0) AS "timeDiffMinutes",
         ST_Distance(r."routeLine"::geography, rider.rider_start_g) AS "startDistanceMeters",
@@ -123,13 +125,8 @@ export class MatchmakingService {
         ST_Distance(r."routeLine"::geography, rider.rider_line_g) AS "corridorDistanceMeters",
         ST_Distance(rider.rider_start_g, rider.rider_end_g) AS "riderDistanceMeters",
         (
-          ABS(EXTRACT(EPOCH FROM (
-            (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second')
-            - rider.rider_start_time
-          )) / 60.0)
-          + (ST_Distance(r."routeLine"::geography, rider.rider_start_g) / 1000.0)
-          + (ST_Distance(r."routeLine"::geography, rider.rider_end_g) / 1000.0)
-          + (ST_Distance(r."routeLine"::geography, rider.rider_line_g) / 2000.0)
+          (ST_Distance(r."routeLine"::geography, rider.rider_start_g) + 
+           ST_Distance(r."routeLine"::geography, rider.rider_end_g)) / 1000.0
         ) AS score
       FROM "Ride" r
       JOIN "User" u ON r."driverId" = u."id"
@@ -138,13 +135,9 @@ export class MatchmakingService {
         r."status" = ${RideStatus.OPEN}::"RideStatus"
         AND r."driverId" != ${userId}
         AND r."seatsAvailable" > 0
-        AND (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry)) * INTERVAL '1 second') 
-            BETWEEN (rider.rider_start_time - (${timeWindowMinutes}::int * INTERVAL '1 minute'))
-            AND (rider.rider_start_time + (${timeWindowMinutes}::int * INTERVAL '1 minute'))
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
-        AND ST_DWithin(r."routeLine"::geography, rider.rider_line_g, ${corridorMeters})
-        AND ST_LineLocatePoint(r."routeLine", rider.rider_start_g::geometry) <= ST_LineLocatePoint(r."routeLine", rider.rider_end_g::geometry)
+        AND ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom) < ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_end_geom)
       ORDER BY score ASC
       LIMIT 50
     `);
