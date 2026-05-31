@@ -190,7 +190,7 @@ export class AuthController {
       user = await this.prisma.user.create({
         data: {
           phoneNumber: cleanPhone,
-          name: `GoPooler ${cleanPhone.slice(-4)}`,
+          name: `Aroundler ${cleanPhone.slice(-4)}`,
           role: 'passenger',
           firebaseUid: mockFirebaseUid,
         },

@@ -19,7 +19,7 @@ export class SmsService {
     const authToken = process.env.TWILIO_AUTH_TOKEN;
     const twilioPhone = process.env.TWILIO_PHONE_NUMBER;
 
-    const messageBody = `Your GoPool Carpool verification code is: ${code}. Valid for 5 minutes.`;
+    const messageBody = `Your Aroundly verification code is: ${code}. Valid for 5 minutes.`;
 
     // Sandbox Mock Mode: Used if Twilio keys are not configured in local development environment
     if (!accountSid || !authToken || !twilioPhone) {
