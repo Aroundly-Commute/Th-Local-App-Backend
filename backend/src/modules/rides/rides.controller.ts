@@ -15,8 +15,15 @@ export class RidesController {
   }
 
   @Get()
-  async list(@Request() req: any, @Query('status') status?: RideStatus) {
-    return this.rides.listRides(status, undefined, req.user.id);
+  async list(
+    @Request() req: any,
+    @Query('status') status?: RideStatus,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = page ? parseInt(page, 10) : undefined;
+    const limitNum = limit ? parseInt(limit, 10) : undefined;
+    return this.rides.listRides(status, undefined, req.user.id, pageNum, limitNum);
   }
 
   @Get('my')

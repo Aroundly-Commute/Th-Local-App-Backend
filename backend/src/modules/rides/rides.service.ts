@@ -107,7 +107,7 @@ export class RidesService {
     return rows[0];
   }
 
-  async listRides(status?: RideStatus, driverId?: string, excludeDriverId?: string) {
+  async listRides(status?: RideStatus, driverId?: string, excludeDriverId?: string, page?: number, limit?: number) {
     const conditions: Prisma.Sql[] = [];
     if (status) conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
@@ -117,6 +117,18 @@ export class RidesService {
     conditions.push(Prisma.sql`r."startTime" >= NOW()`);
 
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
+    
+    let limitClause = Prisma.sql`LIMIT 200`;
+    let offsetClause = Prisma.empty;
+
+    if (limit && limit > 0) {
+      limitClause = Prisma.sql`LIMIT ${limit}`;
+      if (page && page > 0) {
+        const offset = (page - 1) * limit;
+        offsetClause = Prisma.sql`OFFSET ${offset}`;
+      }
+    }
+
     return this.prisma.$queryRaw<
       Array<{
         id: string;
@@ -143,7 +155,8 @@ export class RidesService {
       JOIN "User" u ON r."driverId" = u."id"
       ${where}
       ORDER BY r."startTime" ASC
-      LIMIT 200
+      ${limitClause}
+      ${offsetClause}
     `);
   }
 
