@@ -296,15 +296,13 @@ export class AuthController {
     const { name, phoneNumber, avatarUrl, profilePic, gender } = body;
     console.log(`[AUTH] Updating profile for user ${req.user.id}:`, body);
 
-    let cleanPhone = undefined;
+    let cleanPhone: string | null | undefined = undefined;
     if (phoneNumber !== undefined && phoneNumber !== null) {
       if (phoneNumber === '') {
         cleanPhone = null;
       } else {
-        cleanPhone = phoneNumber.trim();
-        if (!cleanPhone.startsWith('+')) {
-          cleanPhone = `+91${cleanPhone}`;
-        }
+        const trimmed = phoneNumber.trim();
+        cleanPhone = trimmed.startsWith('+') ? trimmed : `+91${trimmed}`;
 
         // Check if phone number is already registered to ANOTHER user
         const existing = await this.prisma.user.findFirst({
