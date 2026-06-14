@@ -8,288 +8,355 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+enum RideStatus {
+  OPEN
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
 model Ride {
-  id              String                   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  createdAt       DateTime                 @default(now())
-  updatedAt       DateTime                 @updatedAt
-  driverId        String
-  seatsAvailable  Int                      @default(1)
-  chargeCents     Int
-  startTime       DateTime
-  endTime         DateTime
-  startPlaceName  String
-  endPlaceName    String
-  startPoint      Unsupported("geometry")?
-  endPoint        Unsupported("geometry")?
-  routeLine       Unsupported("geometry")?
-  status          RideStatus               @default(OPEN)
-  vehicleType     String                   @default("CAR")
-  vehicleCapacity Int                      @default(5)
-  fuelType        String                   @default("Petrol")
-  vehicleNumber   String                   @default("")
-  driver          User                     @relation("DriverRides", fields: [driverId], references: [id], onUpdate: NoAction)
-  requests        RideRequest[]
+  id                String     @id @default(uuid())
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  driverId          String
+  driver            User       @relation("DriverRides", fields: [driverId], references: [id])
+  seatsAvailable    Int        @default(1)
+  chargeCents       Int
+
+  startTime         DateTime
+  endTime           DateTime
+
+  startPlaceName    String
+  endPlaceName      String
+
+  // PostGIS geometry (SRID 4326) stored as:
+  // - startPoint/endPoint: POINT
+  // - routeLine: LINESTRING
+  startPoint        Unsupported("geometry(Point,4326)")?
+  endPoint          Unsupported("geometry(Point,4326)")?
+  routeLine         Unsupported("geometry(LineString,4326)")?
+
+  status            RideStatus @default(OPEN)
+
+  vehicleType       String     @default("CAR")
+  vehicleCapacity   Int        @default(5)
+  fuelType          String     @default("Petrol")
+  vehicleNumber     String     @default("")
+
+  requests          RideRequest[]
 
   @@index([startTime])
   @@index([endTime])
 }
 
 model RideRequest {
-  id             String                   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
+  id             String   @id @default(uuid())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
   rideId         String
+  ride           Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+
   riderId        String
+  rider          User     @relation("RiderRequests", fields: [riderId], references: [id])
   riderStartName String
   riderEndName   String
   riderStartTime DateTime
-  riderStart     Unsupported("geometry")?
-  riderEnd       Unsupported("geometry")?
-  status         RideStatus               @default(REQUESTED)
-  fareCents      Int                      @default(1000)
-  ride           Ride                     @relation(fields: [rideId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  rider          User                     @relation("RiderRequests", fields: [riderId], references: [id], onUpdate: NoAction)
+
+  riderStart     Unsupported("geometry(Point,4326)")?
+  riderEnd       Unsupported("geometry(Point,4326)")?
+
+  status         RideStatus @default(REQUESTED)
+  fareCents      Int        @default(1000)
 
   @@index([rideId])
 }
 
 model User {
-  id               String            @id @default(dbgenerated("(gen_random_uuid())::text"))
-  email            String?           @unique
-  name             String
-  firebaseUid      String            @unique
-  phoneNumber      String?           @unique
-  profilePic       String?
-  passwordHash     String?
-  role             String            @default("passenger")
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  gender           String?
-  fcmToken         String?
-  bookings         Booking[]
-  cart             Cart?
-  follows          Follow[]
-  messages         Message[]
-  orders           Order[]
-  parkingBookings  ParkingBooking[]  @relation("UserParkingBookings")
-  parkingSpots     ParkingSpot[]     @relation("OwnerParkingSpots")
-  ridesAsDriver    Ride[]            @relation("DriverRides")
-  rideRequests     RideRequest[]     @relation("RiderRequests")
-  serviceProviders ServiceProvider[]
+  id            String        @id @default(uuid())
+  email         String?       @unique
+  name          String
+  firebaseUid   String        @unique
+  phoneNumber   String?       @unique
+  profilePic    String?
+  passwordHash  String?
+  role          String        @default("passenger")
+  gender        String?
+  fcmToken      String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // A user can post many rides (as a driver)
+  ridesAsDriver Ride[]        @relation("DriverRides")
+
+  // A user can request many rides (as a rider)
+  rideRequests  RideRequest[] @relation("RiderRequests")
+
+  buddyRequests BuddyRequest[] @relation("RiderBuddyRequests")
+
+  // Messages sent by this user
+  messages      Message[]
+
   shops            Shop[]
-  vehicle          Vehicle?
+  serviceProviders ServiceProvider[]
+  bookings         Booking[]
+  cart          Cart?
+  orders        Order[]
+  follows       Follow[]
+
+  // Parking relations
+  parkingSpots    ParkingSpot[]    @relation("OwnerParkingSpots")
+  parkingBookings ParkingBooking[] @relation("UserParkingBookings")
+
+  vehicle       Vehicle?
 }
 
 model Message {
-  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  chatId    String
+  id        String   @id @default(uuid())
+  chatId    String   // rideId:userId or similar
   text      String
+  status    String   @default("SENT") // SENT, DELIVERED, READ
   createdAt DateTime @default(now())
+
   senderId  String
-  status    String   @default("SENT")
-  sender    User     @relation(fields: [senderId], references: [id], onUpdate: NoAction)
+  sender    User     @relation(fields: [senderId], references: [id])
 
   @@index([chatId])
 }
 
 model Shop {
-  id          String        @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id          String   @id @default(uuid())
   ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
   name        String
   description String?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  owner       User          @relation(fields: [ownerId], references: [id], onUpdate: NoAction)
   products    ShopProduct[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model Product {
-  id           String        @id @default(dbgenerated("(gen_random_uuid())::text"))
-  name         String
-  description  String?
-  imageUrl     String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  imageUrl    String?
   shopProducts ShopProduct[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model ShopProduct {
-  id         String      @id @default(dbgenerated("(gen_random_uuid())::text"))
-  shopId     String
-  productId  String
-  price      Float
-  stock      Int         @default(0)
-  createdAt  DateTime    @default(now())
-  updatedAt  DateTime    @updatedAt
-  cartItems  CartItem[]
-  orderItems OrderItem[]
-  product    Product     @relation(fields: [productId], references: [id], onUpdate: NoAction)
-  shop       Shop        @relation(fields: [shopId], references: [id], onUpdate: NoAction)
+  id          String   @id @default(uuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id])
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  price       Float
+  stock       Int      @default(0)
+  cartItems   CartItem[]
+  orderItems  OrderItem[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@unique([shopId, productId])
 }
 
 model Cart {
-  id        String     @id @default(dbgenerated("(gen_random_uuid())::text"))
-  userId    String     @unique
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-  user      User       @relation(fields: [userId], references: [id], onUpdate: NoAction)
-  items     CartItem[]
+  id          String     @id @default(uuid())
+  userId      String     @unique
+  user        User       @relation(fields: [userId], references: [id])
+  items       CartItem[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 }
 
 model CartItem {
-  id            String      @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id            String      @id @default(uuid())
   cartId        String
+  cart          Cart        @relation(fields: [cartId], references: [id])
   shopProductId String
+  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id])
   quantity      Int         @default(1)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
-  cart          Cart        @relation(fields: [cartId], references: [id], onUpdate: NoAction)
-  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id], onUpdate: NoAction)
 }
 
 model Order {
-  id          String      @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id          String      @id @default(uuid())
   userId      String
+  user        User        @relation(fields: [userId], references: [id])
   totalAmount Float
   status      OrderStatus @default(PENDING)
+  items       OrderItem[]
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
-  user        User        @relation(fields: [userId], references: [id], onUpdate: NoAction)
-  items       OrderItem[]
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  SHIPPED
+  DELIVERED
+  CANCELLED
 }
 
 model OrderItem {
-  id            String      @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id            String      @id @default(uuid())
   orderId       String
+  order         Order       @relation(fields: [orderId], references: [id])
   shopProductId String
+  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id])
   quantity      Int
   priceAtTime   Float
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
-  order         Order       @relation(fields: [orderId], references: [id], onUpdate: NoAction)
-  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id], onUpdate: NoAction)
 }
 
 model ServiceProvider {
-  id               String    @id @default(dbgenerated("(gen_random_uuid())::text"))
-  ownerId          String
-  name             String
-  services         String?
-  rating           Float     @default(5.0)
-  ratingCount      Int       @default(1)
-  dist             String?   @default("0.5 km")
-  emoji            String?   @default("🛠️")
-  bg               String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  id          String    @id @default(uuid())
+  ownerId     String
+  owner       User      @relation(fields: [ownerId], references: [id])
+  name        String
+  services    String?
+  rating      Float     @default(5.0)
+  ratingCount Int       @default(1)
+  dist        String?   @default("0.5 km")
+  emoji       String?   @default("🛠️")
+  bg          String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   providedServices Service[]
-  owner            User      @relation(fields: [ownerId], references: [id], onUpdate: NoAction)
 }
 
 model Service {
-  id          String          @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id          String    @id @default(uuid())
   providerId  String
+  provider    ServiceProvider @relation(fields: [providerId], references: [id])
   name        String
   price       Float
   description String?
-  rating      Float           @default(5.0)
-  emoji       String?         @default("🛠️")
+  rating      Float     @default(5.0)
+  emoji       String?   @default("🛠️")
   category    String
   bg          String?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
   bookings    Booking[]
-  provider    ServiceProvider @relation(fields: [providerId], references: [id], onUpdate: NoAction)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 model Booking {
-  id        String   @id @default(dbgenerated("(gen_random_uuid())::text"))
-  userId    String
-  serviceId String
-  timeSlot  String
-  date      String   @default("Today")
-  status    String   @default("PENDING")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  service   Service  @relation(fields: [serviceId], references: [id], onUpdate: NoAction)
-  user      User     @relation(fields: [userId], references: [id], onUpdate: NoAction)
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  serviceId   String
+  service     Service   @relation(fields: [serviceId], references: [id])
+  timeSlot    String
+  date        String    @default("Today")
+  status      String    @default("PENDING")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 model Follow {
-  id         String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id         String   @id @default(uuid())
   userId     String
-  businessId String
+  user       User     @relation(fields: [userId], references: [id])
+  businessId String   // shopId or providerId
   createdAt  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onUpdate: NoAction)
 
   @@unique([userId, businessId])
 }
 
+// ==========================================
+// Parking Reservation System Models
+// ==========================================
+
+enum ParkingSlotType {
+  HOURLY
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum BookingStatus {
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
 model ParkingSpot {
-  id             String                @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id             String                @id @default(uuid())
   spotName       String                @unique
-  level          Int
-  section        String
-  row            Int
-  col            Int
+  level          Int                   // 1 to 5
+  section        String                // "LEFT", "MIDDLE", "RIGHT"
+  row            Int                   // 1 to 3
+  col            Int                   // 1 to 4
   ownerId        String?
+  owner          User?                 @relation("OwnerParkingSpots", fields: [ownerId], references: [id], onDelete: SetNull)
   approved       Boolean               @default(false)
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
   priceHourly    Float                 @default(50)
   priceDaily     Float                 @default(100)
-  priceWeekly    Float                 @default(500)
+  priceWeekly     Float                 @default(500)
   priceMonthly   Float                 @default(1000)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
   availabilities ParkingAvailability[]
   bookings       ParkingBooking[]
-  owner          User?                 @relation("OwnerParkingSpots", fields: [ownerId], references: [id], onUpdate: NoAction)
 }
 
 model ParkingAvailability {
-  id        String           @id @default(dbgenerated("(gen_random_uuid())::text"))
-  spotId    String
-  date      String
-  slotType  ParkingSlotType  @default(HOURLY)
-  startTime DateTime
-  endTime   DateTime
-  price     Float
-  isBooked  Boolean          @default(false)
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-  spot      ParkingSpot      @relation(fields: [spotId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  bookings  ParkingBooking[]
+  id             String          @id @default(uuid())
+  spotId         String
+  spot           ParkingSpot     @relation(fields: [spotId], references: [id], onDelete: Cascade)
+  date           String          // e.g. "2026-05-22"
+  slotType       ParkingSlotType @default(HOURLY)
+  startTime      DateTime
+  endTime        DateTime
+  price          Float
+  isBooked       Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  bookings       ParkingBooking[]
 }
 
 model ParkingBooking {
-  id             String               @id @default(dbgenerated("(gen_random_uuid())::text"))
+  id             String              @id @default(uuid())
   spotId         String
+  spot           ParkingSpot         @relation(fields: [spotId], references: [id], onDelete: Cascade)
   availabilityId String?
+  availability   ParkingAvailability? @relation(fields: [availabilityId], references: [id], onDelete: SetNull)
   userId         String
-  date           String
+  user           User                @relation("UserParkingBookings", fields: [userId], references: [id], onDelete: Cascade)
+  date           String              // "2026-05-22"
   slotType       ParkingSlotType
   startTime      DateTime
   endTime        DateTime
   price          Float
-  status         BookingStatus        @default(REQUESTED)
-  createdAt      DateTime             @default(now())
-  updatedAt      DateTime             @updatedAt
-  availability   ParkingAvailability? @relation(fields: [availabilityId], references: [id], onUpdate: NoAction)
-  spot           ParkingSpot          @relation(fields: [spotId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  user           User                 @relation("UserParkingBookings", fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  status         BookingStatus       @default(REQUESTED)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 }
 
 model Vehicle {
   id            String   @id @default(uuid())
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
   userId        String   @unique
-  vehicleNumber String
-  type          String
-  capacity      Int
-  fuelType      String
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  vehicleNumber String
+  type          String   // "CAR" | "BIKE"
+  capacity      Int      // 2 | 5 | 7
+  fuelType      String   // "CNG" | "Petrol" | "Diesel"
 }
 
 model VerificationCode {
@@ -306,48 +373,27 @@ model PendingNotification {
   id        String   @id @default(uuid())
   userId    String
   type      String
-  payload   String
+  payload   String   // JSON stringified payload
   createdAt DateTime @default(now())
 
   @@index([userId])
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
-model spatial_ref_sys {
-  srid      Int     @id
-  auth_name String? @db.VarChar(256)
-  auth_srid Int?
-  srtext    String? @db.VarChar(2048)
-  proj4text String? @db.VarChar(2048)
-}
+model BuddyRequest {
+  id             String   @id @default(uuid())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-enum RideStatus {
-  OPEN
-  REQUESTED
-  ACCEPTED
-  REJECTED
-  CANCELLED
-}
+  riderId        String
+  rider          User     @relation("RiderBuddyRequests", fields: [riderId], references: [id], onDelete: Cascade)
 
-enum OrderStatus {
-  PENDING
-  CONFIRMED
-  REJECTED
-  SHIPPED
-  DELIVERED
-  CANCELLED
-}
+  startPlaceName String
+  endPlaceName   String
+  startTime      DateTime
 
-enum ParkingSlotType {
-  HOURLY
-  DAILY
-  WEEKLY
-  MONTHLY
-}
+  startPoint     Unsupported("geometry(Point,4326)")?
+  endPoint       Unsupported("geometry(Point,4326)")?
 
-enum BookingStatus {
-  REQUESTED
-  ACCEPTED
-  REJECTED
-  CANCELLED
+  seatsNeeded    Int      @default(1)
+  status         String   @default("OPEN") // "OPEN" | "ACCEPTED" | "CANCELLED"
 }
