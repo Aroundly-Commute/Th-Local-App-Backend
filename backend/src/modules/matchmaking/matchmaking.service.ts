@@ -298,16 +298,26 @@ export class MatchmakingService {
     `);
   }
 
-  async updateRequestStatus(requestId: string, status: RideStatus) {
-    if (!(status === RideStatus.ACCEPTED || status === RideStatus.REJECTED)) {
-      throw new BadRequestException('Only ACCEPTED or REJECTED are allowed here');
+  async updateRequestStatus(requestId: string, status: RideStatus, userId: string) {
+    if (!(status === RideStatus.ACCEPTED || status === RideStatus.REJECTED || status === RideStatus.CANCELLED)) {
+      throw new BadRequestException('Only ACCEPTED, REJECTED or CANCELLED are allowed here');
     }
 
     const req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
-      select: { id: true, rideId: true, status: true, riderId: true },
+      include: { ride: true }
     });
     if (!req) throw new NotFoundException('Request not found');
+
+    if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
+      if (req.ride.driverId !== userId) {
+        throw new BadRequestException('Only the driver can accept or reject requests');
+      }
+    } else if (status === RideStatus.CANCELLED) {
+      if (req.riderId !== userId) {
+        throw new BadRequestException('Only the rider can cancel their request');
+      }
+    }
 
     const updatedReq = await this.prisma.rideRequest.update({
       where: { id: requestId },
@@ -315,24 +325,58 @@ export class MatchmakingService {
       select: { id: true, rideId: true, status: true, updatedAt: true },
     });
 
-    // Simple ride status transition for phase 1
-    await this.prisma.ride.update({
-      where: { id: req.rideId },
-      data: { status },
-      select: { id: true },
-    });
+    if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
+      await this.prisma.ride.update({
+        where: { id: req.rideId },
+        data: { status },
+        select: { id: true },
+      });
+    } else if (status === RideStatus.CANCELLED) {
+      const activeRequests = await this.prisma.rideRequest.count({
+        where: { rideId: req.rideId, status: RideStatus.ACCEPTED }
+      });
+      const newStatus = activeRequests > 0 ? RideStatus.ACCEPTED : RideStatus.OPEN;
+      await this.prisma.ride.update({
+        where: { id: req.rideId },
+        data: { status: newStatus },
+        select: { id: true },
+      });
+    }
 
-    // Notify the rider in real-time
-    this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
-    await this.chatService.sendNotificationToUser(
-      req.riderId,
-      `Ride Request ${status}`,
-      `Your ride request status has been updated to ${status.toLowerCase()}.`,
-      'ride_request_updated',
-      updatedReq
-    );
+    if (status === RideStatus.CANCELLED) {
+      this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
+      await this.chatService.sendNotificationToUser(
+        req.ride.driverId,
+        'Booking Cancelled',
+        'A rider has cancelled their booking for your ride.',
+        'ride_request_updated',
+        updatedReq
+      );
+    } else {
+      this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+      await this.chatService.sendNotificationToUser(
+        req.riderId,
+        `Ride Request ${status}`,
+        `Your ride request status has been updated to ${status.toLowerCase()}.`,
+        'ride_request_updated',
+        updatedReq
+      );
+    }
 
     return updatedReq;
+  }
+
+  async updateBuddyRequestStatus(id: string, status: string, userId: string) {
+    const req = await this.prisma.buddyRequest.findUnique({
+      where: { id }
+    });
+    if (!req) throw new NotFoundException('Buddy request not found');
+    if (req.riderId !== userId) throw new BadRequestException('Not authorized to update this request');
+
+    return this.prisma.buddyRequest.update({
+      where: { id },
+      data: { status }
+    });
   }
 
   async createBuddyRequest(body: any, riderId: string) {

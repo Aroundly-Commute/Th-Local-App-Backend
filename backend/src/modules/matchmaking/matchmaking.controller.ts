@@ -26,8 +26,21 @@ export class MatchmakingController {
   }
 
   @Patch('requests/:id')
-  async updateRequest(@Param('id') id: string, @Body() body: { status: RideStatus }) {
-    return this.mm.updateRequestStatus(id, body.status);
+  async updateRequest(
+    @Param('id') id: string,
+    @Body() body: { status: RideStatus },
+    @Request() req: any,
+  ) {
+    return this.mm.updateRequestStatus(id, body.status, req.user.id);
+  }
+
+  @Patch('buddies/:id')
+  async updateBuddyRequest(
+    @Param('id') id: string,
+    @Body() body: { status: string },
+    @Request() req: any,
+  ) {
+    return this.mm.updateBuddyRequestStatus(id, body.status, req.user.id);
   }
 
   @Post('buddies')
