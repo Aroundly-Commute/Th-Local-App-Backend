@@ -71,6 +71,7 @@ model RideRequest {
 
   status         RideStatus @default(REQUESTED)
   fareCents      Int        @default(1000)
+  seats          Int        @default(1)
 
   @@index([rideId])
 }

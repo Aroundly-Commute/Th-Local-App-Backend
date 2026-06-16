@@ -207,6 +207,7 @@ export class RidesService {
       status: rr.status,
       chat_id: `chat_${rr.id}`,
       fareCents: rr.fareCents,
+      seats: rr.seats,
     }));
 
     if (userId && userId !== ride.driverId) {
@@ -476,7 +477,14 @@ export class RidesService {
       throw new BadRequestException('Cannot book your own ride');
     }
 
-    const { riderStartName, riderEndName, riderStartCoords, riderEndCoords, riderStartTime } = body || {};
+    const { riderStartName, riderEndName, riderStartCoords, riderEndCoords, riderStartTime, seats } = body || {};
+    const requestedSeats = Number(seats) || 1;
+    if (requestedSeats <= 0) {
+      throw new BadRequestException('Invalid seats count');
+    }
+    if (ride.seatsAvailable < requestedSeats) {
+      throw new BadRequestException(`Not enough available seats. Only ${ride.seatsAvailable} remaining.`);
+    }
 
     const overlappingDriver = await this.prisma.ride.findFirst({
        where: {
@@ -554,7 +562,8 @@ export class RidesService {
         riderEndName: riderEndName || ride.endPlaceName,
         riderStartTime: riderStartTime ? new Date(riderStartTime) : ride.startTime,
         status: RideStatus.REQUESTED,
-        fareCents: calculatedFareCents
+        fareCents: calculatedFareCents,
+        seats: requestedSeats
       },
       include: {
         rider: true,
@@ -626,6 +635,7 @@ export class RidesService {
         rider_avatar: rr.rider?.profilePic || null,
         status: rr.status,
         chat_id: `chat_${rr.id}`,
+        seats: rr.seats,
       })),
       chat_id,
       peer_name,

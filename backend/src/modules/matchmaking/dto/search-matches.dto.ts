@@ -53,5 +53,11 @@ export class SearchMatchesDto {
   @IsNumber()
   @Min(1)
   timeWindowMinutes?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  seats?: number;
 }
 

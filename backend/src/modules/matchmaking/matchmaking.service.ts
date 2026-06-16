@@ -21,6 +21,8 @@ export class MatchmakingService {
     const riderStartTime = new Date(dto.startTime);
     if (isNaN(riderStartTime.valueOf())) throw new BadRequestException('Invalid startTime');
 
+    const seats = dto.seats ?? 1;
+
     // Pre-search check to prevent unnecessary heavy SQL queries if the user is already busy
     const overlappingDriverRides = await this.prisma.ride.findFirst({
       where: {
@@ -132,9 +134,9 @@ export class MatchmakingService {
       JOIN "User" u ON r."driverId" = u."id"
       CROSS JOIN rider
       WHERE
-        r."status" = ${RideStatus.OPEN}::"RideStatus"
+        r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
         AND r."driverId" != ${userId}
-        AND r."seatsAvailable" > 0
+        AND r."seatsAvailable" >= ${seats}
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
         AND ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom) < ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_end_geom)
@@ -178,6 +180,9 @@ export class MatchmakingService {
     const riderStartTime = new Date(dto.riderStartTime);
     if (isNaN(riderStartTime.valueOf())) throw new BadRequestException('Invalid riderStartTime');
 
+    const seats = dto.seats ?? 1;
+    if (seats <= 0) throw new BadRequestException('Invalid seats count');
+
     // Ensure ride exists + is open
     const ride = await this.prisma.ride.findUnique({
       where: { id: dto.rideId },
@@ -185,8 +190,12 @@ export class MatchmakingService {
     });
     if (!ride) throw new NotFoundException('Ride not found');
     if (ride.driverId === riderId) throw new BadRequestException('You cannot request your own ride');
-    if (ride.status !== RideStatus.OPEN) throw new BadRequestException('Ride is not open');
-    if (ride.seatsAvailable <= 0) throw new BadRequestException('No seats available');
+    if (ride.status === RideStatus.CANCELLED || ride.status === RideStatus.REJECTED) {
+      throw new BadRequestException('Ride is not open for booking');
+    }
+    if (ride.seatsAvailable < seats) {
+      throw new BadRequestException(`Not enough seats available. Only ${ride.seatsAvailable} remaining.`);
+    }
 
     const startWkt = pointWkt(dto.riderStart);
     const endWkt = pointWkt(dto.riderEnd);
@@ -234,14 +243,15 @@ export class MatchmakingService {
       }>
     >(Prisma.sql`
       INSERT INTO "RideRequest"
-        ("id", "updatedAt", "rideId","riderId","riderStartName","riderEndName","riderStartTime","riderStart","riderEnd","status")
+        ("id", "updatedAt", "rideId","riderId","riderStartName","riderEndName","riderStartTime","riderStart","riderEnd","status","seats")
       VALUES
         (${id}, ${now}, ${dto.rideId}, ${riderId}, ${dto.riderStartName}, ${dto.riderEndName}, ${riderStartTime},
          ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
          ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
-         ${RideStatus.REQUESTED}::"RideStatus"
+         ${RideStatus.REQUESTED}::"RideStatus",
+         ${seats}
         )
-      RETURNING "id","rideId","riderId" as "riderName","riderStartName","riderEndName","riderStartTime","status"
+      RETURNING "id","rideId","riderId" as "riderName","riderStartName","riderEndName","riderStartTime","status","seats"
     `);
 
     // Mark ride requested (simple phase-1 state machine)
@@ -319,29 +329,73 @@ export class MatchmakingService {
       }
     }
 
+    if (status === RideStatus.ACCEPTED) {
+      if (req.status !== RideStatus.ACCEPTED) {
+        if (req.ride.seatsAvailable < req.seats) {
+          throw new BadRequestException(`Not enough available seats. Only ${req.ride.seatsAvailable} remaining.`);
+        }
+        
+        const newSeatsAvailable = req.ride.seatsAvailable - req.seats;
+        let rideStatus = req.ride.status;
+        if (newSeatsAvailable === 0) {
+          rideStatus = RideStatus.ACCEPTED;
+        } else {
+          const otherRequestedCount = await this.prisma.rideRequest.count({
+            where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+          });
+          rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
+        }
+
+        await this.prisma.ride.update({
+          where: { id: req.rideId },
+          data: {
+            seatsAvailable: newSeatsAvailable,
+            status: rideStatus
+          }
+        });
+      }
+    } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED) {
+      if (req.status === RideStatus.ACCEPTED) {
+        const newSeatsAvailable = req.ride.seatsAvailable + req.seats;
+        const otherRequestedCount = await this.prisma.rideRequest.count({
+          where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+        });
+        const rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
+
+        await this.prisma.ride.update({
+          where: { id: req.rideId },
+          data: {
+            seatsAvailable: newSeatsAvailable,
+            status: rideStatus
+          }
+        });
+      } else if (req.status === RideStatus.REQUESTED) {
+        const pendingCount = await this.prisma.rideRequest.count({
+          where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+        });
+        const acceptedCount = await this.prisma.rideRequest.count({
+          where: { rideId: req.rideId, status: RideStatus.ACCEPTED }
+        });
+        
+        let rideStatus: RideStatus = RideStatus.OPEN;
+        if (pendingCount > 0) {
+          rideStatus = RideStatus.REQUESTED;
+        } else if (acceptedCount > 0) {
+          rideStatus = RideStatus.ACCEPTED;
+        }
+        
+        await this.prisma.ride.update({
+          where: { id: req.rideId },
+          data: { status: rideStatus }
+        });
+      }
+    }
+
     const updatedReq = await this.prisma.rideRequest.update({
       where: { id: requestId },
       data: { status },
       select: { id: true, rideId: true, status: true, updatedAt: true },
     });
-
-    if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
-      await this.prisma.ride.update({
-        where: { id: req.rideId },
-        data: { status },
-        select: { id: true },
-      });
-    } else if (status === RideStatus.CANCELLED) {
-      const activeRequests = await this.prisma.rideRequest.count({
-        where: { rideId: req.rideId, status: RideStatus.ACCEPTED }
-      });
-      const newStatus = activeRequests > 0 ? RideStatus.ACCEPTED : RideStatus.OPEN;
-      await this.prisma.ride.update({
-        where: { id: req.rideId },
-        data: { status: newStatus },
-        select: { id: true },
-      });
-    }
 
     if (status === RideStatus.CANCELLED) {
       this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);

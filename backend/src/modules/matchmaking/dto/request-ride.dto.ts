@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDateString, IsNotEmpty, IsNumber, IsString, IsUUID, ValidateNested } from 'class-validator';
+import { IsDateString, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, Min, ValidateNested } from 'class-validator';
 
 class LngLatDto {
   @IsNumber()
@@ -37,5 +37,11 @@ export class RequestRideDto {
   @ValidateNested()
   @Type(() => LngLatDto)
   riderEnd!: LngLatDto;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  seats?: number;
 }
 
