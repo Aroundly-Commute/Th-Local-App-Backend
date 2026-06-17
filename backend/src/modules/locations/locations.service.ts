@@ -7,7 +7,7 @@ export class LocationsService {
   async suggestLocations(q: string) {
     if (!this.googleMapsApiKey || !q || q.length < 3) return [];
     try {
-      const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(q)}&key=${this.googleMapsApiKey}`;
+      const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(q)}&components=country:in&key=${this.googleMapsApiKey}`;
       const response = await fetch(url);
       const data = await response.json();
       const predictions = data.predictions || [];
