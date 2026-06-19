@@ -4,7 +4,6 @@ import { PrismaModule } from './modules/prisma/prisma.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { RidesModule } from './modules/rides/rides.module';
 import { MatchmakingModule } from './modules/matchmaking/matchmaking.module';
-import { MarketplaceModule } from './modules/marketplace/marketplace.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { ParkingModule } from './modules/parking/parking.module';
 import { LocationsModule } from './modules/locations/locations.module';
@@ -19,7 +18,6 @@ import { AppController } from './app.controller';
     AuthModule,
     RidesModule,
     MatchmakingModule,
-    MarketplaceModule,
     StorageModule,
     ParkingModule,
     LocationsModule,
