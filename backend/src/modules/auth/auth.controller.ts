@@ -365,9 +365,6 @@ export class AuthController {
 
     // Delete associated cleanable tables first to prevent constraint violations
     await this.prisma.vehicle.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.cart.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.follow.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.booking.deleteMany({ where: { userId } }).catch(() => {});
     await this.prisma.parkingBooking.deleteMany({ where: { userId } }).catch(() => {});
     await this.prisma.parkingSpot.deleteMany({ where: { ownerId: userId } }).catch(() => {});
 
