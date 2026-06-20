@@ -13,7 +13,8 @@ export class FirebaseAuthGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;
     
-    console.log("[AUTH GUARD] canActivate triggered. Headers:", JSON.stringify(request.headers));
+    // Log the request method and URL safely without exposing sensitive authorization headers
+    console.log(`[AUTH GUARD] canActivate triggered for request: ${request.method} ${request.url}`);
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       console.warn("[AUTH GUARD] Access denied: No Bearer token provided in Authorization header");
@@ -28,13 +29,16 @@ export class FirebaseAuthGuard implements CanActivate {
       let decodedLocalToken: any = null;
       let user: any = null;
 
-      // Check if it's a local JWT
+      // Check if it's a local JWT (by decoding the header first without validation)
       try {
-        console.log("[AUTH GUARD] Attempting local JWT verification with JWT_SECRET...");
-        decodedLocalToken = jwt.verify(token, JWT_SECRET);
-        console.log("[AUTH GUARD] Local JWT verified successfully. Decoded payload:", JSON.stringify(decodedLocalToken));
+        const decodedHeader: any = jwt.decode(token, { complete: true });
+        if (decodedHeader && decodedHeader.header && decodedHeader.header.alg === 'HS256') {
+          console.log("[AUTH GUARD] Local HS256 JWT detected. Verifying signature...");
+          decodedLocalToken = jwt.verify(token, JWT_SECRET);
+          console.log("[AUTH GUARD] Local JWT verified successfully. Decoded payload:", JSON.stringify(decodedLocalToken));
+        }
       } catch (e: any) {
-        console.log("[AUTH GUARD] Token is not a local JWT. Error details:", e?.message || e);
+        console.log("[AUTH GUARD] Failed to check or verify local JWT:", e?.message || e);
       }
 
       if (decodedLocalToken && decodedLocalToken.sub) {

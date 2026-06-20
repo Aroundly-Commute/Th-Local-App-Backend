@@ -71,6 +71,7 @@ model RideRequest {
 
   status         RideStatus @default(REQUESTED)
   fareCents      Int        @default(1000)
+  seats          Int        @default(1)
 
   @@index([rideId])
 }
@@ -86,6 +87,9 @@ model User {
   role          String        @default("passenger")
   gender        String?
   fcmToken      String?
+  society       String?
+  workplace     String?
+  bio           String?
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -101,12 +105,6 @@ model User {
   // Messages sent by this user
   messages      Message[]
 
-  shops            Shop[]
-  serviceProviders ServiceProvider[]
-  bookings         Booking[]
-  cart          Cart?
-  orders        Order[]
-  follows       Follow[]
 
   // Parking relations
   parkingSpots    ParkingSpot[]    @relation("OwnerParkingSpots")
@@ -126,150 +124,6 @@ model Message {
   sender    User     @relation(fields: [senderId], references: [id])
 
   @@index([chatId])
-}
-
-model Shop {
-  id          String   @id @default(uuid())
-  ownerId     String
-  owner       User     @relation(fields: [ownerId], references: [id])
-  name        String
-  description String?
-  products    ShopProduct[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model Product {
-  id          String   @id @default(uuid())
-  name        String
-  description String?
-  imageUrl    String?
-  shopProducts ShopProduct[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model ShopProduct {
-  id          String   @id @default(uuid())
-  shopId      String
-  shop        Shop     @relation(fields: [shopId], references: [id])
-  productId   String
-  product     Product  @relation(fields: [productId], references: [id])
-  price       Float
-  stock       Int      @default(0)
-  cartItems   CartItem[]
-  orderItems  OrderItem[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@unique([shopId, productId])
-}
-
-model Cart {
-  id          String     @id @default(uuid())
-  userId      String     @unique
-  user        User       @relation(fields: [userId], references: [id])
-  items       CartItem[]
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-}
-
-model CartItem {
-  id            String      @id @default(uuid())
-  cartId        String
-  cart          Cart        @relation(fields: [cartId], references: [id])
-  shopProductId String
-  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id])
-  quantity      Int         @default(1)
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-}
-
-model Order {
-  id          String      @id @default(uuid())
-  userId      String
-  user        User        @relation(fields: [userId], references: [id])
-  totalAmount Float
-  status      OrderStatus @default(PENDING)
-  items       OrderItem[]
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-}
-
-enum OrderStatus {
-  PENDING
-  CONFIRMED
-  REJECTED
-  SHIPPED
-  DELIVERED
-  CANCELLED
-}
-
-model OrderItem {
-  id            String      @id @default(uuid())
-  orderId       String
-  order         Order       @relation(fields: [orderId], references: [id])
-  shopProductId String
-  shopProduct   ShopProduct @relation(fields: [shopProductId], references: [id])
-  quantity      Int
-  priceAtTime   Float
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-}
-
-model ServiceProvider {
-  id          String    @id @default(uuid())
-  ownerId     String
-  owner       User      @relation(fields: [ownerId], references: [id])
-  name        String
-  services    String?
-  rating      Float     @default(5.0)
-  ratingCount Int       @default(1)
-  dist        String?   @default("0.5 km")
-  emoji       String?   @default("🛠️")
-  bg          String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  providedServices Service[]
-}
-
-model Service {
-  id          String    @id @default(uuid())
-  providerId  String
-  provider    ServiceProvider @relation(fields: [providerId], references: [id])
-  name        String
-  price       Float
-  description String?
-  rating      Float     @default(5.0)
-  emoji       String?   @default("🛠️")
-  category    String
-  bg          String?
-  bookings    Booking[]
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-}
-
-model Booking {
-  id          String    @id @default(uuid())
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  serviceId   String
-  service     Service   @relation(fields: [serviceId], references: [id])
-  timeSlot    String
-  date        String    @default("Today")
-  status      String    @default("PENDING")
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-}
-
-model Follow {
-  id         String   @id @default(uuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id])
-  businessId String   // shopId or providerId
-  createdAt  DateTime @default(now())
-
-  @@unique([userId, businessId])
 }
 
 // ==========================================

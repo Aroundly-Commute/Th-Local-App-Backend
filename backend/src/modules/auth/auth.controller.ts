@@ -306,7 +306,7 @@ export class AuthController {
   @Patch('profile')
   @UseGuards(FirebaseAuthGuard)
   async updateProfile(@Request() req: any, @Body() body: any) {
-    const { name, phoneNumber, avatarUrl, profilePic, gender } = body;
+    const { name, phoneNumber, avatarUrl, profilePic, gender, society, workplace, bio } = body;
     console.log(`[AUTH] Updating profile for user ${req.user.id}:`, body);
 
     let cleanPhone: string | null | undefined = undefined;
@@ -337,6 +337,9 @@ export class AuthController {
         phoneNumber: cleanPhone !== undefined ? cleanPhone : undefined,
         profilePic: (avatarUrl || profilePic) !== undefined ? (avatarUrl || profilePic) : undefined,
         gender: gender !== undefined ? gender : undefined,
+        society: society !== undefined ? society : undefined,
+        workplace: workplace !== undefined ? workplace : undefined,
+        bio: bio !== undefined ? bio : undefined,
       }
     });
 
@@ -365,9 +368,6 @@ export class AuthController {
 
     // Delete associated cleanable tables first to prevent constraint violations
     await this.prisma.vehicle.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.cart.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.follow.deleteMany({ where: { userId } }).catch(() => {});
-    await this.prisma.booking.deleteMany({ where: { userId } }).catch(() => {});
     await this.prisma.parkingBooking.deleteMany({ where: { userId } }).catch(() => {});
     await this.prisma.parkingSpot.deleteMany({ where: { ownerId: userId } }).catch(() => {});
 

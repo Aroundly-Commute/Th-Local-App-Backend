@@ -163,24 +163,6 @@ export class ChatService {
         return senderId === parkingBooking.userId ? parkingBooking.spot.ownerId : parkingBooking.userId;
       }
 
-      // Try Booking (Service)
-      const booking = await this.prisma.booking.findUnique({
-        where: { id },
-        include: { service: { include: { provider: true } } }
-      });
-      if (booking) {
-        return senderId === booking.userId ? booking.service.provider.ownerId : booking.userId;
-      }
-
-      // Try Order (Shop)
-      const order = await this.prisma.order.findUnique({
-        where: { id },
-        include: { items: { include: { shopProduct: { include: { shop: true } } } } }
-      });
-      if (order && order.items.length > 0) {
-        const ownerId = order.items[0].shopProduct.shop.ownerId;
-        return senderId === order.userId ? ownerId : order.userId;
-      }
     } catch (err) {
       console.error(`[CHAT] Error resolving recipient for chatId: ${chatId}`, err);
     }

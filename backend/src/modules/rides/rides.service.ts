@@ -207,6 +207,7 @@ export class RidesService {
       status: rr.status,
       chat_id: `chat_${rr.id}`,
       fareCents: rr.fareCents,
+      seats: rr.seats,
     }));
 
     if (userId && userId !== ride.driverId) {
@@ -230,6 +231,34 @@ export class RidesService {
       data: { status },
       select: { id: true, status: true, updatedAt: true },
     });
+
+    if (status === RideStatus.CANCELLED) {
+      const activeRequests = await this.prisma.rideRequest.findMany({
+        where: { rideId: id, status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] } }
+      });
+
+      if (activeRequests.length > 0) {
+        await this.prisma.rideRequest.updateMany({
+          where: { rideId: id, status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] } },
+          data: { status: RideStatus.CANCELLED }
+        });
+
+        for (const req of activeRequests) {
+          try {
+            await this.chatService.sendNotificationToUser(
+              req.riderId,
+              'Ride Cancelled by Driver',
+              'The driver has cancelled the offered ride.',
+              'ride_cancelled',
+              { rideId: id, requestId: req.id }
+            );
+          } catch (e) {
+            console.error('Failed to send cancellation notification to rider:', req.riderId, e);
+          }
+        }
+      }
+    }
+
     return updated;
   }
 
@@ -245,6 +274,11 @@ export class RidesService {
     const riderRequests = await this.prisma.rideRequest.findMany({
       where: { riderId: userId },
       include: { ride: { include: { driver: true } } }
+    });
+
+    const buddyRequests = await this.prisma.buddyRequest.findMany({
+      where: { riderId: userId },
+      include: { rider: true }
     });
 
     const upcoming: any[] = [];
@@ -277,6 +311,34 @@ export class RidesService {
         }
       } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
         past.push(mapped);
+      }
+    });
+
+    buddyRequests.forEach(br => {
+      const mapped = {
+        id: br.id,
+        isBuddyRequest: true,
+        role: 'rider',
+        request_status: br.status,
+        driver_name: br.rider?.name || 'Buddy Request',
+        driver_avatar: br.rider?.profilePic || null,
+        driver_rating: 5.0,
+        origin: br.startPlaceName,
+        destination: br.endPlaceName,
+        departure_time: br.startTime.toISOString(),
+        seats_available: br.seatsNeeded,
+        price_per_seat: 0,
+        status: br.status,
+        chat_id: null,
+        peer_name: 'Buddy',
+      };
+
+      if (br.status === 'CANCELLED' || br.startTime < new Date()) {
+        past.push(mapped);
+      } else if (br.status === 'OPEN') {
+        requested.push(mapped);
+      } else {
+        upcoming.push(mapped);
       }
     });
 
@@ -415,7 +477,14 @@ export class RidesService {
       throw new BadRequestException('Cannot book your own ride');
     }
 
-    const { riderStartName, riderEndName, riderStartCoords, riderEndCoords, riderStartTime } = body || {};
+    const { riderStartName, riderEndName, riderStartCoords, riderEndCoords, riderStartTime, seats } = body || {};
+    const requestedSeats = Number(seats) || 1;
+    if (requestedSeats <= 0) {
+      throw new BadRequestException('Invalid seats count');
+    }
+    if (ride.seatsAvailable < requestedSeats) {
+      throw new BadRequestException(`Not enough available seats. Only ${ride.seatsAvailable} remaining.`);
+    }
 
     const overlappingDriver = await this.prisma.ride.findFirst({
        where: {
@@ -493,7 +562,8 @@ export class RidesService {
         riderEndName: riderEndName || ride.endPlaceName,
         riderStartTime: riderStartTime ? new Date(riderStartTime) : ride.startTime,
         status: RideStatus.REQUESTED,
-        fareCents: calculatedFareCents
+        fareCents: calculatedFareCents,
+        seats: requestedSeats
       },
       include: {
         rider: true,
@@ -565,6 +635,7 @@ export class RidesService {
         rider_avatar: rr.rider?.profilePic || null,
         status: rr.status,
         chat_id: `chat_${rr.id}`,
+        seats: rr.seats,
       })),
       chat_id,
       peer_name,
