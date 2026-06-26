@@ -111,6 +111,7 @@ model User {
   parkingBookings ParkingBooking[] @relation("UserParkingBookings")
 
   vehicle       Vehicle?
+  savedPlaces   SavedPlace[]
 }
 
 model Message {
@@ -250,4 +251,18 @@ model BuddyRequest {
 
   seatsNeeded    Int      @default(1)
   status         String   @default("OPEN") // "OPEN" | "ACCEPTED" | "CANCELLED"
+}
+
+model SavedPlace {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String   // e.g. "Home", "Work", "Gym"
+  address   String
+  latitude  Float?
+  longitude Float?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }

@@ -466,8 +466,8 @@ export class MatchmakingService {
     return buddyRequest;
   }
 
-  async listBuddyRequests(userId: string) {
-    return this.prisma.buddyRequest.findMany({
+  async listBuddyRequests(userId: string, page?: number, limit?: number) {
+    const prismaParams: any = {
       where: {
         riderId: { not: userId },
         status: 'OPEN',
@@ -486,7 +486,16 @@ export class MatchmakingService {
       orderBy: {
         createdAt: 'desc'
       }
-    });
+    };
+
+    if (limit && limit > 0) {
+      prismaParams.take = limit;
+      if (page && page > 1) {
+        prismaParams.skip = (page - 1) * limit;
+      }
+    }
+
+    return this.prisma.buddyRequest.findMany(prismaParams);
   }
 }
 
