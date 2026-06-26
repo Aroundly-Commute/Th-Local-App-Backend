@@ -134,6 +134,7 @@ export class RidesService {
         id: string;
         driverName: string;
         driverAvatar: string | null;
+        driverGender: string | null;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -146,7 +147,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar",
+        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
@@ -167,6 +168,7 @@ export class RidesService {
         driverId: string;
         driverName: string;
         driverAvatar: string | null;
+        driverGender: string | null;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -180,7 +182,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        r."id", r."driverId", u."name" as "driverName", u."profilePic" as "driverAvatar",
+        r."id", r."driverId", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
@@ -621,6 +623,7 @@ export class RidesService {
       driver_id: r.driverId,
       driver_name: r.driver?.name || 'Driver',
       driver_avatar: r.driver?.profilePic || null,
+      driver_gender: r.driver?.gender || null,
       driver_rating: 5.0,
       origin: r.startPlaceName,
       destination: r.endPlaceName,
@@ -652,6 +655,7 @@ export class RidesService {
       driver_id: r.driverId,
       driver_name: r.driver?.name || 'Driver',
       driver_avatar: r.driver?.profilePic || null,
+      driver_gender: r.driver?.gender || null,
       driver_rating: 5.0,
       origin: rr.riderStartName || r.startPlaceName,
       destination: rr.riderEndName || r.endPlaceName,

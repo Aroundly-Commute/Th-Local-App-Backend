@@ -9,6 +9,7 @@ import { ParkingModule } from './modules/parking/parking.module';
 import { LocationsModule } from './modules/locations/locations.module';
 import { SustainabilityModule } from './modules/sustainability/sustainability.module';
 import { ChatModule } from './modules/chat/chat.module';
+import { SavedPlacesModule } from './modules/saved-places/saved-places.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -23,6 +24,7 @@ import { AppController } from './app.controller';
     LocationsModule,
     SustainabilityModule,
     ChatModule,
+    SavedPlacesModule,
   ],
   controllers: [AppController],
 })
