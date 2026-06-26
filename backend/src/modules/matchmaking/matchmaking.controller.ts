@@ -49,8 +49,14 @@ export class MatchmakingController {
   }
 
   @Get('buddies')
-  async listBuddyRequests(@Request() req: any) {
-    return this.mm.listBuddyRequests(req.user.id);
+  async listBuddyRequests(
+    @Request() req: any,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = page ? parseInt(page, 10) : undefined;
+    const limitNum = limit ? parseInt(limit, 10) : undefined;
+    return this.mm.listBuddyRequests(req.user.id, pageNum, limitNum);
   }
 }
 
