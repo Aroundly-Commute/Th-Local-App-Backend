@@ -54,22 +54,18 @@ export class MatchmakingService {
 
     const startRadiusMeters = dto.startRadiusMeters ?? 3000;
     const endRadiusMeters = dto.endRadiusMeters ?? 3000;
-    const corridorMeters = dto.corridorMeters ?? 3000;
     const timeWindowMinutes = dto.timeWindowMinutes ?? 30;
 
     const startWkt = pointWkt(dto.start);
     const endWkt = pointWkt(dto.end);
 
-    // Basic matching strategy (phase 1):
-    // - time overlap within ±timeWindowMinutes of riderStartTime
-    // - start/end proximity within radii
-    // - route corridor overlap: driver route should be close to rider start->end line
-    //
-    // Score = time difference (minutes) + normalized distance components.
-    const rows = await this.prisma.$queryRaw<
+    // 1. Query Offered Rides (r.driverId != userId)
+    const ridesRows = await this.prisma.$queryRaw<
       Array<{
         id: string;
         driverName: string;
+        driverAvatar: string | null;
+        driverGender: string | null;
         chargeCents: number;
         seatsAvailable: number;
         startTime: Date;
@@ -79,12 +75,13 @@ export class MatchmakingService {
         status: RideStatus;
         startPointGeoJson: string;
         endPointGeoJson: string;
-        estimatedPickupTime: Date;
-        timeDiffMinutes: number;
+        vehicleType: string;
+        vehicleCapacity: number;
+        fuelType: string;
+        vehicleNumber: string;
+        riderDistanceMeters: number;
         startDistanceMeters: number;
         endDistanceMeters: number;
-        corridorDistanceMeters: number;
-        score: number;
       }>
     >(Prisma.sql`
       WITH
@@ -94,16 +91,13 @@ export class MatchmakingService {
             ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography AS rider_end_g,
             ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geometry AS rider_start_geom,
             ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geometry AS rider_end_geom,
-            ST_MakeLine(
-              ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
-              ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)
-            )::geography AS rider_line_g,
             ${riderStartTime}::timestamptz AS rider_start_time
         )
       SELECT
         r."id",
         u."name" as "driverName",
         u."profilePic" as "driverAvatar",
+        u."gender" as "driverGender",
         r."chargeCents",
         r."seatsAvailable",
         r."startTime",
@@ -117,19 +111,9 @@ export class MatchmakingService {
         r."vehicleCapacity",
         r."fuelType",
         r."vehicleNumber",
-        (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom)) * INTERVAL '1 second') AS "estimatedPickupTime",
-        ABS(EXTRACT(EPOCH FROM (
-          (r."startTime" + (EXTRACT(EPOCH FROM (r."endTime" - r."startTime")) * ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom)) * INTERVAL '1 second')
-          - rider.rider_start_time
-        )) / 60.0) AS "timeDiffMinutes",
         ST_Distance(r."routeLine"::geography, rider.rider_start_g) AS "startDistanceMeters",
         ST_Distance(r."routeLine"::geography, rider.rider_end_g) AS "endDistanceMeters",
-        ST_Distance(r."routeLine"::geography, rider.rider_line_g) AS "corridorDistanceMeters",
-        ST_Distance(rider.rider_start_g, rider.rider_end_g) AS "riderDistanceMeters",
-        (
-          (ST_Distance(r."routeLine"::geography, rider.rider_start_g) + 
-           ST_Distance(r."routeLine"::geography, rider.rider_end_g)) / 1000.0
-        ) AS score
+        ST_Distance(rider.rider_start_g, rider.rider_end_g) AS "riderDistanceMeters"
       FROM "Ride" r
       JOIN "User" u ON r."driverId" = u."id"
       CROSS JOIN rider
@@ -137,15 +121,16 @@ export class MatchmakingService {
         r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
         AND r."driverId" != ${userId}
         AND r."seatsAvailable" >= ${seats}
+        AND DATE(r."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(rider.rider_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
         AND ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom) < ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_end_geom)
-      ORDER BY score ASC
+      ORDER BY ABS(EXTRACT(EPOCH FROM (r."startTime" - rider.rider_start_time))) ASC
       LIMIT 50
     `);
 
     const { calculateFare } = require('../../common/utils/pricing');
-    const matches = rows.map((row) => {
+    const offeredRides = ridesRows.map((row) => {
       const fareInfo = calculateFare({
         distanceMeters: Number((row as any).riderDistanceMeters) || 0,
         deviationMeters: (Number(row.startDistanceMeters) || 0) + (Number(row.endDistanceMeters) || 0),
@@ -162,6 +147,126 @@ export class MatchmakingService {
       };
     });
 
+    // 2. Query Cab Buddy Requests (type = 'buddy')
+    const buddiesRows = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+      WITH
+        search AS (
+          SELECT
+            ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography AS search_start_g,
+            ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography AS search_end_g,
+            ${riderStartTime}::timestamptz AS search_start_time
+        )
+      SELECT
+        br."id",
+        br."riderId",
+        u."name" as "riderName",
+        u."profilePic" as "riderAvatar",
+        u."gender" as "riderGender",
+        br."seatsNeeded",
+        br."startPlaceName",
+        br."endPlaceName",
+        br."startTime",
+        br."status",
+        br."type",
+        ST_AsGeoJSON(br."startPoint") AS "startPointGeoJson",
+        ST_AsGeoJSON(br."endPoint") AS "endPointGeoJson"
+      FROM "BuddyRequest" br
+      JOIN "User" u ON br."riderId" = u."id"
+      CROSS JOIN search
+      WHERE
+        br."status" = 'OPEN'
+        AND br."riderId" != ${userId}
+        AND br."type" = 'buddy'
+        AND DATE(br."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
+        AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
+      ORDER BY ABS(EXTRACT(EPOCH FROM (br."startTime" - search.search_start_time))) ASC
+      LIMIT 50
+    `);
+
+    const buddiesMatches = buddiesRows.map(b => ({
+      ...b,
+      isBuddyRequest: true,
+      rider: {
+        id: b.riderId,
+        name: b.riderName,
+        profilePic: b.riderAvatar,
+        gender: b.riderGender,
+        rating: 5.0
+      }
+    }));
+
+    // 3. Query Car Pooling Requests (type = 'carpool')
+    const carpoolsRows = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+      WITH
+        search AS (
+          SELECT
+            ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography AS search_start_g,
+            ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography AS search_end_g,
+            ${riderStartTime}::timestamptz AS search_start_time
+        )
+      SELECT
+        br."id",
+        br."riderId",
+        u."name" as "riderName",
+        u."profilePic" as "riderAvatar",
+        u."gender" as "riderGender",
+        br."seatsNeeded",
+        br."startPlaceName",
+        br."endPlaceName",
+        br."startTime",
+        br."status",
+        br."type",
+        ST_AsGeoJSON(br."startPoint") AS "startPointGeoJson",
+        ST_AsGeoJSON(br."endPoint") AS "endPointGeoJson"
+      FROM "BuddyRequest" br
+      JOIN "User" u ON br."riderId" = u."id"
+      CROSS JOIN search
+      WHERE
+        br."status" = 'OPEN'
+        AND br."riderId" != ${userId}
+        AND br."type" = 'carpool'
+        AND DATE(br."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
+        AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
+      ORDER BY ABS(EXTRACT(EPOCH FROM (br."startTime" - search.search_start_time))) ASC
+      LIMIT 50
+    `);
+
+    const carpoolsMatches = carpoolsRows.map(c => ({
+      ...c,
+      isBuddyRequest: true,
+      rider: {
+        id: c.riderId,
+        name: c.riderName,
+        profilePic: c.riderAvatar,
+        gender: c.riderGender,
+        rating: 5.0
+      }
+    }));
+
+    // Group sections and sort sections ordering based on the source feature
+    const feature = dto.feature || 'main';
+    const sections: Array<{ title: string; type: 'offered' | 'buddies' | 'carpools'; data: any[] }> = [];
+
+    const offeredSection = { title: 'Offered Rides by Others', type: 'offered' as const, data: offeredRides };
+    const buddiesSection = { title: 'Buddies Looking for Ride', type: 'buddies' as const, data: buddiesMatches };
+    const carpoolsSection = { title: 'Car Pooling Requests by Others', type: 'carpools' as const, data: carpoolsMatches };
+
+    if (feature === 'buddy') {
+      sections.push(buddiesSection);
+      sections.push(offeredSection);
+      sections.push(carpoolsSection);
+    } else if (feature === 'offer') {
+      sections.push(carpoolsSection);
+      sections.push(buddiesSection);
+    } else {
+      // 'main' or 'carpool'
+      sections.push(offeredSection);
+      sections.push(buddiesSection);
+      sections.push(carpoolsSection);
+    }
+
     return {
       query: {
         start: dto.start,
@@ -169,10 +274,9 @@ export class MatchmakingService {
         startTime: riderStartTime.toISOString(),
         startRadiusMeters,
         endRadiusMeters,
-        corridorMeters,
-        timeWindowMinutes,
+        feature,
       },
-      matches,
+      sections,
     };
   }
 
@@ -434,7 +538,7 @@ export class MatchmakingService {
   }
 
   async createBuddyRequest(body: any, riderId: string) {
-    const { startPlaceName, endPlaceName, startCoords, endCoords, startTime, seatsNeeded } = body;
+    const { startPlaceName, endPlaceName, startCoords, endCoords, startTime, seatsNeeded, type } = body;
     const departureTime = new Date(startTime);
     if (isNaN(departureTime.valueOf())) {
       throw new BadRequestException('Invalid startTime');
@@ -451,6 +555,7 @@ export class MatchmakingService {
         startTime: departureTime.toISOString(),
         seatsNeeded: Number(seatsNeeded) || 1,
         status: 'OPEN',
+        type: type || 'buddy',
       }
     });
 
@@ -496,6 +601,50 @@ export class MatchmakingService {
     }
 
     return this.prisma.buddyRequest.findMany(prismaParams);
+  }
+
+  async getBuddyRequest(id: string) {
+    const row = await this.prisma.buddyRequest.findUnique({
+      where: { id },
+      include: {
+        rider: {
+          select: {
+            id: true,
+            name: true,
+            profilePic: true,
+            gender: true
+          }
+        }
+      }
+    });
+    if (!row) throw new NotFoundException('Buddy request not found');
+
+    const geoResult = await this.prisma.$queryRaw<
+      Array<{
+        startPointGeoJson: string | null;
+        endPointGeoJson: string | null;
+        distanceMeters: number | null;
+      }>
+    >(Prisma.sql`
+      SELECT 
+        ST_AsGeoJSON("startPoint") as "startPointGeoJson",
+        ST_AsGeoJSON("endPoint") as "endPointGeoJson",
+        ST_Distance("startPoint"::geography, "endPoint"::geography) as "distanceMeters"
+      FROM "BuddyRequest"
+      WHERE id = ${id}
+    `);
+
+    const distanceMeters = Number(geoResult[0]?.distanceMeters || 0);
+    const distance_km = distanceMeters / 1000.0;
+    const co2_saved_kg = distance_km * 0.12;
+
+    return {
+      ...row,
+      startPointGeoJson: geoResult[0]?.startPointGeoJson,
+      endPointGeoJson: geoResult[0]?.endPointGeoJson,
+      distance_km,
+      co2_saved_kg,
+    };
   }
 }
 

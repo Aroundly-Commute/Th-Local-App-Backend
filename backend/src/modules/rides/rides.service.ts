@@ -129,7 +129,7 @@ export class RidesService {
       }
     }
 
-    return this.prisma.$queryRaw<
+    const rides = await this.prisma.$queryRaw<
       Array<{
         id: string;
         driverName: string;
@@ -144,6 +144,7 @@ export class RidesService {
         status: RideStatus;
         startPointGeoJson: string;
         endPointGeoJson: string;
+        distanceMeters: number | null;
       }>
     >(Prisma.sql`
       SELECT
@@ -151,7 +152,8 @@ export class RidesService {
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
-        ST_AsGeoJSON(r."endPoint") as "endPointGeoJson"
+        ST_AsGeoJSON(r."endPoint") as "endPointGeoJson",
+        ST_Distance(r."startPoint"::geography, r."endPoint"::geography) as "distanceMeters"
       FROM "Ride" r
       JOIN "User" u ON r."driverId" = u."id"
       ${where}
@@ -159,6 +161,17 @@ export class RidesService {
       ${limitClause}
       ${offsetClause}
     `);
+
+    return rides.map(ride => {
+      const distanceMeters = Number(ride.distanceMeters || 0);
+      const distance_km = distanceMeters / 1000.0;
+      const co2_saved_kg = distance_km * 0.12;
+      return {
+        ...ride,
+        distance_km,
+        co2_saved_kg,
+      };
+    });
   }
 
   async getRide(id: string, userId?: string) {
@@ -179,6 +192,11 @@ export class RidesService {
         startPointGeoJson: string;
         endPointGeoJson: string;
         routeGeoJson: string;
+        distanceMeters: number | null;
+        vehicleType: string;
+        vehicleCapacity: number;
+        fuelType: string;
+        vehicleNumber: string;
       }>
     >(Prisma.sql`
       SELECT
@@ -188,7 +206,8 @@ export class RidesService {
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
         ST_AsGeoJSON(r."endPoint") as "endPointGeoJson",
         ST_AsGeoJSON(r."routeLine") as "routeGeoJson",
-        r."vehicleType", r."vehicleCapacity", r."fuelType", r."vehicleNumber"
+        r."vehicleType", r."vehicleCapacity", r."fuelType", r."vehicleNumber",
+        ST_Distance(r."startPoint"::geography, r."endPoint"::geography) as "distanceMeters"
       FROM "Ride" r
       JOIN "User" u ON r."driverId" = u."id"
       WHERE r."id" = ${id}
@@ -224,7 +243,15 @@ export class RidesService {
       }
     }
 
-    return ride;
+    const distanceMeters = Number(ride.distanceMeters || 0);
+    const distance_km = distanceMeters / 1000.0;
+    const co2_saved_kg = distance_km * 0.12;
+
+    return {
+      ...ride,
+      distance_km,
+      co2_saved_kg,
+    };
   }
 
   async setRideStatus(id: string, status: RideStatus) {

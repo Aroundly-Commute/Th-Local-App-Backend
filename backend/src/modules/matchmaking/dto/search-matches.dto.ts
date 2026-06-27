@@ -59,5 +59,9 @@ export class SearchMatchesDto {
   @IsNumber()
   @Min(1)
   seats?: number;
+
+  @IsOptional()
+  @IsString()
+  feature?: string;
 }
 
