@@ -251,6 +251,7 @@ model BuddyRequest {
 
   seatsNeeded    Int      @default(1)
   status         String   @default("OPEN") // "OPEN" | "ACCEPTED" | "CANCELLED"
+  type           String   @default("buddy")
 }
 
 model SavedPlace {

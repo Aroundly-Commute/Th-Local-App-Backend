@@ -48,6 +48,11 @@ export class MatchmakingController {
     return this.mm.createBuddyRequest(body, req.user.id);
   }
 
+  @Get('buddies/:id')
+  async getBuddyRequest(@Param('id') id: string) {
+    return this.mm.getBuddyRequest(id);
+  }
+
   @Get('buddies')
   async listBuddyRequests(
     @Request() req: any,
