@@ -10,6 +10,8 @@ import { LocationsModule } from './modules/locations/locations.module';
 import { SustainabilityModule } from './modules/sustainability/sustainability.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { SavedPlacesModule } from './modules/saved-places/saved-places.module';
+import { VerificationModule } from './modules/verification/verification.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -25,6 +27,8 @@ import { AppController } from './app.controller';
     SustainabilityModule,
     ChatModule,
     SavedPlacesModule,
+    VerificationModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
 })

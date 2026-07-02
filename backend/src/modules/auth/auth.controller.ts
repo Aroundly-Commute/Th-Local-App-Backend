@@ -32,11 +32,12 @@ export class AuthController {
 
     return {
       ...user,
-      rating: 5.0,
+      rating: user.rating ?? 5.0,
       rides_count: ridesCount,
       co2_saved_kg: co2Saved,
       money_saved: moneySaved,
-      is_verified: true,
+      is_verified: user.isVerified || false,
+      corporate_email: user.corporateEmail || null,
       avatar_url: user.profilePic || null,
       vehicle: vehicle || null,
     };
