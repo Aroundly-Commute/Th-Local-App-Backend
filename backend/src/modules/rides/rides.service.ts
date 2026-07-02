@@ -148,7 +148,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender",
+        r."id", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender", u."rating" as "driverRating",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
@@ -182,6 +182,7 @@ export class RidesService {
         driverName: string;
         driverAvatar: string | null;
         driverGender: string | null;
+        driverRating: number;
         seatsAvailable: number;
         chargeCents: number;
         startTime: Date;
@@ -200,7 +201,7 @@ export class RidesService {
       }>
     >(Prisma.sql`
       SELECT
-        r."id", r."driverId", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender",
+        r."id", r."driverId", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender", u."rating" as "driverRating",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
@@ -216,10 +217,26 @@ export class RidesService {
     if (!rows[0]) throw new NotFoundException('Ride not found');
     const ride = rows[0];
 
+    const isPastRide = ride.startTime < new Date();
     const requests = await this.prisma.rideRequest.findMany({
-      where: { rideId: id, status: { in: ['REQUESTED', 'ACCEPTED'] as any } },
+      where: { 
+        rideId: id, 
+        status: { in: isPastRide ? ['ACCEPTED'] : ['REQUESTED', 'ACCEPTED'] as any } 
+      },
       include: { rider: true }
     });
+
+    const driverReviews = await this.prisma.review.findMany({
+      where: {
+        fromUserId: ride.driverId,
+        rideId: id
+      }
+    });
+    const passengerReviewMap = new Map<string, number>();
+    driverReviews.forEach(rev => {
+      passengerReviewMap.set(rev.toUserId, rev.rating);
+    });
+
     (ride as any).passengers = requests.map(rr => ({
       request_id: rr.id,
       rider_id: rr.riderId,
@@ -229,8 +246,10 @@ export class RidesService {
       chat_id: `chat_${rr.id}`,
       fareCents: rr.fareCents,
       seats: rr.seats,
+      my_review_rating: passengerReviewMap.get(rr.riderId) || null
     }));
 
+    let my_review_rating: number | null = null;
     if (userId && userId !== ride.driverId) {
       const myRequest = await this.prisma.rideRequest.findFirst({
         where: { rideId: id, riderId: userId }
@@ -241,6 +260,15 @@ export class RidesService {
         (ride as any).my_chat_id = `chat_${myRequest.id}`;
         (ride as any).my_fare_cents = myRequest.fareCents;
       }
+
+      const review = await this.prisma.review.findFirst({
+        where: {
+          fromUserId: userId,
+          toUserId: ride.driverId,
+          rideId: id
+        }
+      });
+      my_review_rating = review ? review.rating : null;
     }
 
     const distanceMeters = Number(ride.distanceMeters || 0);
@@ -251,6 +279,7 @@ export class RidesService {
       ...ride,
       distance_km,
       co2_saved_kg,
+      my_review_rating,
     };
   }
 
@@ -310,12 +339,22 @@ export class RidesService {
       include: { rider: true }
     });
 
+    const writtenReviews = await this.prisma.review.findMany({
+      where: { fromUserId: userId }
+    });
+    const reviewMap = new Map<string, number>();
+    writtenReviews.forEach(rev => {
+      if (rev.rideId) {
+        reviewMap.set(`${rev.rideId}:${rev.toUserId}`, rev.rating);
+      }
+    });
+
     const upcoming: any[] = [];
     const past: any[] = [];
     const requested: any[] = [];
 
     driverRides.forEach(r => {
-      const mapped = this.mapDriverRide(r, userId);
+      const mapped = this.mapDriverRide(r, userId, reviewMap);
       if (r.status === 'CANCELLED' || r.startTime < new Date()) {
         past.push(mapped);
       } else {
@@ -324,7 +363,7 @@ export class RidesService {
     });
 
     riderRequests.forEach(rr => {
-      const mapped = this.mapRiderRequest(rr);
+      const mapped = this.mapRiderRequest(rr, reviewMap);
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
       if (rr.status === 'ACCEPTED') {
         if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
@@ -636,9 +675,10 @@ export class RidesService {
     return { ok: true, chat_id: `chat_${requestId.id}` };
   }
 
-  private mapDriverRide(r: any, userId: string) {
+  private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
+    const isPastRide = r.startTime < new Date();
     const acceptedPassengers = (r.requests || []).filter((rr: any) =>
-      rr.status === 'ACCEPTED' || rr.status === 'REQUESTED'
+      rr.status === 'ACCEPTED' || (!isPastRide && rr.status === 'REQUESTED')
     );
     const firstPassenger = acceptedPassengers[0];
     const chat_id = firstPassenger ? `chat_${firstPassenger.id}` : null;
@@ -651,7 +691,7 @@ export class RidesService {
       driver_name: r.driver?.name || 'Driver',
       driver_avatar: r.driver?.profilePic || null,
       driver_gender: r.driver?.gender || null,
-      driver_rating: 5.0,
+      driver_rating: r.driver?.rating ?? 5.0,
       origin: r.startPlaceName,
       destination: r.endPlaceName,
       departure_time: r.startTime.toISOString(),
@@ -666,13 +706,14 @@ export class RidesService {
         status: rr.status,
         chat_id: `chat_${rr.id}`,
         seats: rr.seats,
+        my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
       })),
       chat_id,
       peer_name,
     };
   }
 
-  private mapRiderRequest(rr: any) {
+  private mapRiderRequest(rr: any, reviewMap?: Map<string, number>) {
     const r = rr.ride;
     return {
       id: r.id,
@@ -683,7 +724,7 @@ export class RidesService {
       driver_name: r.driver?.name || 'Driver',
       driver_avatar: r.driver?.profilePic || null,
       driver_gender: r.driver?.gender || null,
-      driver_rating: 5.0,
+      driver_rating: r.driver?.rating ?? 5.0,
       origin: rr.riderStartName || r.startPlaceName,
       destination: rr.riderEndName || r.endPlaceName,
       departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
@@ -692,6 +733,7 @@ export class RidesService {
       status: r.status,
       chat_id: `chat_${rr.id}`,
       peer_name: r.driver?.name || 'Driver',
+      my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
     };
   }
 }

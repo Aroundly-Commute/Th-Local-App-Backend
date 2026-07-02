@@ -90,6 +90,8 @@ model User {
   society       String?
   workplace     String?
   bio           String?
+  corporateEmail String?       @unique
+  isVerified     Boolean       @default(false)
 
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
@@ -112,6 +114,11 @@ model User {
 
   vehicle       Vehicle?
   savedPlaces   SavedPlace[]
+
+  rating          Float          @default(5.0)
+  ratingCount     Int            @default(0)
+  reviewsWritten  Review[]       @relation("ReviewsWritten")
+  reviewsReceived Review[]       @relation("ReviewsReceived")
 }
 
 model Message {
@@ -266,4 +273,32 @@ model SavedPlace {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+}
+
+model EmailVerificationCode {
+  id          String   @id @default(uuid())
+  email       String
+  code        String
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([email])
+}
+
+model Review {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  fromUserId String
+  fromUser   User     @relation("ReviewsWritten", fields: [fromUserId], references: [id], onDelete: Cascade)
+
+  toUserId   String
+  toUser     User     @relation("ReviewsReceived", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  rideId     String?
+  rating     Float
+  comment    String?
+
+  @@unique([fromUserId, toUserId, rideId])
 }

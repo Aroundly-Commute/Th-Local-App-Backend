@@ -98,6 +98,7 @@ export class MatchmakingService {
         u."name" as "driverName",
         u."profilePic" as "driverAvatar",
         u."gender" as "driverGender",
+        u."rating" as "driverRating",
         r."chargeCents",
         r."seatsAvailable",
         r."startTime",
@@ -162,6 +163,7 @@ export class MatchmakingService {
         u."name" as "riderName",
         u."profilePic" as "riderAvatar",
         u."gender" as "riderGender",
+        u."rating" as "riderRating",
         br."seatsNeeded",
         br."startPlaceName",
         br."endPlaceName",
@@ -192,7 +194,7 @@ export class MatchmakingService {
         name: b.riderName,
         profilePic: b.riderAvatar,
         gender: b.riderGender,
-        rating: 5.0
+        rating: b.riderRating ?? 5.0
       }
     }));
 
@@ -211,6 +213,7 @@ export class MatchmakingService {
         u."name" as "riderName",
         u."profilePic" as "riderAvatar",
         u."gender" as "riderGender",
+        u."rating" as "riderRating",
         br."seatsNeeded",
         br."startPlaceName",
         br."endPlaceName",
@@ -241,7 +244,7 @@ export class MatchmakingService {
         name: c.riderName,
         profilePic: c.riderAvatar,
         gender: c.riderGender,
-        rating: 5.0
+        rating: c.riderRating ?? 5.0
       }
     }));
 
