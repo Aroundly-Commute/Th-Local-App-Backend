@@ -23,7 +23,8 @@ export class MatchmakingService {
 
     const seats = dto.seats ?? 1;
 
-    // Pre-search check to prevent unnecessary heavy SQL queries if the user is already busy
+    // Pre-search check is commented out to allow finding matching passengers for the ride itself
+    /*
     const overlappingDriverRides = await this.prisma.ride.findFirst({
       where: {
         driverId: userId,
@@ -51,6 +52,7 @@ export class MatchmakingService {
     if (overlappingRiderRequests) {
       throw new BadRequestException('You already have a requested ride during this pickup time.');
     }
+    */
 
     const startRadiusMeters = dto.startRadiusMeters ?? 3000;
     const endRadiusMeters = dto.endRadiusMeters ?? 3000;
@@ -122,7 +124,7 @@ export class MatchmakingService {
         r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
         AND r."driverId" != ${userId}
         AND r."seatsAvailable" >= ${seats}
-        AND DATE(r."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(rider.rider_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND DATE((r."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(rider.rider_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
         AND ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_start_geom) < ST_LineLocatePoint(r."routeLine"::geometry, rider.rider_end_geom)
@@ -179,7 +181,7 @@ export class MatchmakingService {
         br."status" = 'OPEN'
         AND br."riderId" != ${userId}
         AND br."type" = 'buddy'
-        AND DATE(br."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND DATE((br."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
       ORDER BY ABS(EXTRACT(EPOCH FROM (br."startTime" - search.search_start_time))) ASC
@@ -229,7 +231,7 @@ export class MatchmakingService {
         br."status" = 'OPEN'
         AND br."riderId" != ${userId}
         AND br."type" = 'carpool'
-        AND DATE(br."startTime" AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND DATE((br."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
       ORDER BY ABS(EXTRACT(EPOCH FROM (br."startTime" - search.search_start_time))) ASC
@@ -648,6 +650,69 @@ export class MatchmakingService {
       distance_km,
       co2_saved_kg,
     };
+  }
+
+  async inviteBuddy(dto: { rideId: string; buddyRequestId: string }, driverId: string) {
+    const { rideId, buddyRequestId } = dto;
+
+    const buddyRequest = await this.prisma.buddyRequest.findUnique({
+      where: { id: buddyRequestId },
+      include: { rider: true }
+    });
+    if (!buddyRequest) throw new NotFoundException('Buddy request not found');
+
+    const ride = await this.prisma.ride.findUnique({
+      where: { id: rideId }
+    });
+    if (!ride) throw new NotFoundException('Ride not found');
+    if (ride.driverId !== driverId) throw new BadRequestException('You do not own this ride');
+
+    if (ride.seatsAvailable < buddyRequest.seatsNeeded) {
+      throw new BadRequestException('Not enough seats available on your ride');
+    }
+
+    const requestId = randomUUID();
+
+    const newRequest = await this.prisma.rideRequest.create({
+      data: {
+        id: requestId,
+        rideId: ride.id,
+        riderId: buddyRequest.riderId,
+        riderStartName: buddyRequest.startPlaceName,
+        riderEndName: buddyRequest.endPlaceName,
+        riderStartTime: buddyRequest.startTime,
+        status: RideStatus.ACCEPTED,
+        fareCents: 1000,
+        seats: buddyRequest.seatsNeeded
+      }
+    });
+
+    await this.prisma.ride.update({
+      where: { id: ride.id },
+      data: {
+        seatsAvailable: ride.seatsAvailable - buddyRequest.seatsNeeded,
+        status: RideStatus.ACCEPTED
+      }
+    });
+
+    await this.prisma.buddyRequest.update({
+      where: { id: buddyRequestId },
+      data: { status: 'ACCEPTED' }
+    });
+
+    try {
+      await this.chatService.sendNotificationToUser(
+        buddyRequest.riderId,
+        'Ride Offer Accepted',
+        'Your buddy request has been accepted by a driver!',
+        'ride_request_updated',
+        newRequest
+      );
+    } catch (e) {
+      console.error('Failed to send notification to rider:', buddyRequest.riderId, e);
+    }
+
+    return newRequest;
   }
 }
 

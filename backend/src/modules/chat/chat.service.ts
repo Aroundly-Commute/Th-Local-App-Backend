@@ -79,16 +79,41 @@ export class ChatService {
       include: { sender: true }
     });
 
-    return messages.map(m => ({
-      chat_id: m.chatId,
-      last_message: m.text,
-      last_time: m.createdAt.toISOString(),
-      other_user: {
-        id: m.senderId === userId ? "other" : m.senderId,
-        name: m.senderId === userId ? "Someone" : m.sender.name,
-      },
-      ride_route: "Ride Chat"
-    }));
+    const chats = [];
+    for (const m of messages) {
+      let otherUserId = null;
+      let otherUserName = "Someone";
+
+      if (m.senderId === userId) {
+        const recipientId = await this.getRecipientId(m.chatId, userId);
+        otherUserId = recipientId;
+        if (otherUserId) {
+          const otherUser = await this.prisma.user.findUnique({
+            where: { id: otherUserId },
+            select: { name: true }
+          });
+          if (otherUser) {
+            otherUserName = otherUser.name;
+          }
+        }
+      } else {
+        otherUserId = m.senderId;
+        otherUserName = m.sender.name;
+      }
+
+      chats.push({
+        chat_id: m.chatId,
+        last_message: m.text,
+        last_time: m.createdAt.toISOString(),
+        other_user: {
+          id: otherUserId || "other",
+          name: otherUserName,
+        },
+        ride_route: "Ride Chat"
+      });
+    }
+
+    return chats;
   }
 
   async getMessages(chatId: string) {
