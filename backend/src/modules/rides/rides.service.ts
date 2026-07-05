@@ -444,7 +444,7 @@ export class RidesService {
   }
 
   async offerRide(body: any, userId: string) {
-    const { startName, endName, startCoords, endCoords, seats, price, date, time } = body;
+    const { startName, endName, startCoords, endCoords, seats, price, date, time, vehicleType: bodyVehicleType } = body;
     const startTime = new Date(`${date}T${time}:00+05:30`);
     const endTime = new Date(startTime.getTime() + 60 * 60 * 1000); // add 1 hr approx
 
@@ -476,7 +476,7 @@ export class RidesService {
       where: { userId }
     });
 
-    const vehicleType = userVehicle?.type || 'CAR';
+    const vehicleType = bodyVehicleType || userVehicle?.type || 'CAR';
     const vehicleCapacity = userVehicle?.capacity || 5;
     const fuelType = userVehicle?.fuelType || 'Petrol';
     const vehicleNumber = userVehicle?.vehicleNumber || '';
