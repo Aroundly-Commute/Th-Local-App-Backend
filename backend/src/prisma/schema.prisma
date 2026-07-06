@@ -73,6 +73,9 @@ model RideRequest {
   fareCents      Int        @default(1000)
   seats          Int        @default(1)
 
+  isInvitation   Boolean    @default(false)
+  buddyRequestId String?
+
   @@index([rideId])
 }
 
