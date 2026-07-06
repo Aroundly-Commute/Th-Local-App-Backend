@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UnauthorizedException, Get, Request, UseGuards, Patch, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Body, UnauthorizedException, Get, Request, UseGuards, Patch, BadRequestException, Param, NotFoundException } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
@@ -91,6 +91,18 @@ export class AuthController {
   @UseGuards(FirebaseAuthGuard)
   async getMe(@Request() req: any) {
     return await this.formatUser(req.user);
+  }
+
+  @Get('users/:id')
+  @UseGuards(FirebaseAuthGuard)
+  async getUserProfile(@Param('id') id: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id }
+    });
+    if (!user) {
+      throw new NotFoundException('User profile not found');
+    }
+    return await this.formatUser(user);
   }
 
   @Post('vehicle')

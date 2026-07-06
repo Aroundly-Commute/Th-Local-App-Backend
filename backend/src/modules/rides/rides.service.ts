@@ -6,6 +6,11 @@ import { lineStringWkt, pointWkt } from '../../common/utils/geo';
 import { PublishRideDto } from './dto/publish-ride.dto';
 import { ChatService } from '../chat/chat.service';
 
+const getDeterministicChatId = (user1: string, user2: string) => {
+  const sorted = [user1, user2].sort();
+  return `chat_${sorted[0]}_${sorted[1]}`;
+};
+
 @Injectable()
 export class RidesService {
   constructor(
@@ -109,9 +114,23 @@ export class RidesService {
 
   async listRides(status?: RideStatus, driverId?: string, excludeDriverId?: string, page?: number, limit?: number) {
     const conditions: Prisma.Sql[] = [];
-    if (status) conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
+    if (status) {
+      conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
+    } else {
+      conditions.push(Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`);
+    }
+
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
-    if (excludeDriverId) conditions.push(Prisma.sql`r."driverId" != ${excludeDriverId}`);
+    
+    if (excludeDriverId) {
+      conditions.push(Prisma.sql`r."driverId" != ${excludeDriverId}`);
+      conditions.push(Prisma.sql`NOT EXISTS (
+        SELECT 1 FROM "RideRequest" rr
+        WHERE rr."rideId" = r."id"
+          AND rr."riderId" = ${excludeDriverId}
+          AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+      )`);
+    }
     
     // Only list rides that have not passed their start time
     conditions.push(Prisma.sql`r."startTime" >= NOW()`);
@@ -243,7 +262,7 @@ export class RidesService {
       rider_name: (rr.rider as any)?.name || 'Passenger',
       rider_avatar: (rr.rider as any)?.profilePic || null,
       status: rr.status,
-      chat_id: `chat_${rr.id}`,
+      chat_id: getDeterministicChatId(ride.driverId, rr.riderId),
       fareCents: rr.fareCents,
       seats: rr.seats,
       my_review_rating: passengerReviewMap.get(rr.riderId) || null
@@ -257,7 +276,8 @@ export class RidesService {
       if (myRequest) {
         (ride as any).my_request_id = myRequest.id;
         (ride as any).my_request_status = myRequest.status;
-        (ride as any).my_chat_id = `chat_${myRequest.id}`;
+        (ride as any).my_request_is_invitation = myRequest.isInvitation || false;
+        (ride as any).my_chat_id = getDeterministicChatId(ride.driverId, userId);
         (ride as any).my_fare_cents = myRequest.fareCents;
       }
 
@@ -383,11 +403,17 @@ export class RidesService {
     });
 
     buddyRequests.forEach(br => {
+      // If the buddy request is accepted, it is represented as a ride request,
+      // so we skip it here to avoid showing duplicate cards in upcoming/past lists.
+      if (br.status === 'ACCEPTED') {
+        return;
+      }
       const mapped = {
         id: br.id,
         isBuddyRequest: true,
         role: 'rider',
         request_status: br.status,
+        driver_id: br.riderId,
         driver_name: br.rider?.name || 'Buddy Request',
         driver_avatar: br.rider?.profilePic || null,
         driver_rating: 5.0,
@@ -672,7 +698,7 @@ export class RidesService {
       }
     );
 
-    return { ok: true, chat_id: `chat_${requestId.id}` };
+    return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
   }
 
   private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
@@ -681,8 +707,9 @@ export class RidesService {
       rr.status === 'ACCEPTED' || (!isPastRide && rr.status === 'REQUESTED')
     );
     const firstPassenger = acceptedPassengers[0];
-    const chat_id = firstPassenger ? `chat_${firstPassenger.id}` : null;
+    const chat_id = firstPassenger ? getDeterministicChatId(r.driverId, firstPassenger.riderId) : null;
     const peer_name = firstPassenger ? firstPassenger.rider?.name : null;
+    const peer_avatar = firstPassenger ? firstPassenger.rider?.profilePic : null;
 
     return {
       id: r.id,
@@ -698,18 +725,20 @@ export class RidesService {
       seats_available: r.seatsAvailable,
       price_per_seat: r.chargeCents / 100,
       status: r.status,
+      vehicle_type: r.vehicleType,
       passengers: acceptedPassengers.map((rr: any) => ({
         request_id: rr.id,
         rider_id: rr.riderId,
         rider_name: rr.rider?.name || 'Passenger',
         rider_avatar: rr.rider?.profilePic || null,
         status: rr.status,
-        chat_id: `chat_${rr.id}`,
+        chat_id: getDeterministicChatId(r.driverId, rr.riderId),
         seats: rr.seats,
         my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
       })),
       chat_id,
       peer_name,
+      peer_avatar,
     };
   }
 
@@ -731,8 +760,11 @@ export class RidesService {
       seats_available: r.seatsAvailable,
       price_per_seat: r.chargeCents / 100,
       status: r.status,
-      chat_id: `chat_${rr.id}`,
+      vehicle_type: r.vehicleType,
+      chat_id: getDeterministicChatId(r.driverId, rr.riderId),
       peer_name: r.driver?.name || 'Driver',
+      peer_avatar: r.driver?.profilePic || null,
+      is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
     };
   }

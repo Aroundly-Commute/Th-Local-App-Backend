@@ -25,6 +25,11 @@ export class MatchmakingController {
     return this.mm.listRequests(rideId, req.user.id);
   }
 
+  @Get('requests/received')
+  async listReceivedRequests(@Request() req: any) {
+    return this.mm.listReceivedRequests(req.user.id);
+  }
+
   @Patch('requests/:id')
   async updateRequest(
     @Param('id') id: string,
@@ -46,6 +51,11 @@ export class MatchmakingController {
   @Post('buddies')
   async createBuddyRequest(@Request() req: any, @Body() body: any) {
     return this.mm.createBuddyRequest(body, req.user.id);
+  }
+
+  @Post('buddies/request')
+  async requestBuddyMatch(@Request() req: any, @Body() body: { buddyRequestId: string }) {
+    return this.mm.requestBuddyMatch(body.buddyRequestId, req.user.id);
   }
 
   @Post('invite')
