@@ -121,8 +121,14 @@ export class MatchmakingService {
       JOIN "User" u ON r."driverId" = u."id"
       CROSS JOIN rider
       WHERE
-        r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+        r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")
         AND r."driverId" != ${userId}
+        AND NOT EXISTS (
+          SELECT 1 FROM "RideRequest" rr
+          WHERE rr."rideId" = r."id"
+            AND rr."riderId" = ${userId}
+            AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+        )
         AND r."seatsAvailable" >= ${seats}
         AND DATE((r."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(rider.rider_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
@@ -181,6 +187,14 @@ export class MatchmakingService {
         br."status" = 'OPEN'
         AND br."riderId" != ${userId}
         AND br."type" = 'buddy'
+        AND NOT EXISTS (
+          SELECT 1 FROM "RideRequest" rr
+          JOIN "Ride" r ON rr."rideId" = r."id"
+          WHERE rr."buddyRequestId" = br."id"
+            AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+            AND (rr."riderId" = ${userId} OR r."driverId" = ${userId})
+        )
+        AND DATE((br."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
         AND DATE((br."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
@@ -231,6 +245,13 @@ export class MatchmakingService {
         br."status" = 'OPEN'
         AND br."riderId" != ${userId}
         AND br."type" = 'carpool'
+        AND NOT EXISTS (
+          SELECT 1 FROM "RideRequest" rr
+          JOIN "Ride" r ON rr."rideId" = r."id"
+          WHERE rr."buddyRequestId" = br."id"
+            AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+            AND (rr."riderId" = ${userId} OR r."driverId" = ${userId})
+        )
         AND DATE((br."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(br."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(br."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
@@ -386,35 +407,71 @@ export class MatchmakingService {
   }
 
   async listRequests(rideId?: string, riderId?: string) {
-    const conditions: Prisma.Sql[] = [];
-    if (rideId) conditions.push(Prisma.sql`rr."rideId" = ${rideId}`);
-    else if (riderId) conditions.push(Prisma.sql`rr."riderId" = ${riderId}`);
-    
-    const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
-    return this.prisma.$queryRaw<
-      Array<{
-        id: string;
-        rideId: string;
-        riderName: string;
-        riderAvatar: string | null;
-        riderStartName: string;
-        riderEndName: string;
-        riderStartTime: Date;
-        status: RideStatus;
-        riderStartGeoJson: string;
-        riderEndGeoJson: string;
-      }>
-    >(Prisma.sql`
-      SELECT
-        rr."id", rr."rideId", u."name" as "riderName", u."profilePic" as "riderAvatar", rr."riderStartName", rr."riderEndName", rr."riderStartTime", rr."status",
-        ST_AsGeoJSON(rr."riderStart") as "riderStartGeoJson",
-        ST_AsGeoJSON(rr."riderEnd") as "riderEndGeoJson"
-      FROM "RideRequest" rr
-      JOIN "User" u ON rr."riderId" = u."id"
-      ${where}
-      ORDER BY rr."createdAt" DESC
-      LIMIT 200
-    `);
+    const whereClause: any = {};
+    if (rideId) {
+      whereClause.rideId = rideId;
+    } else if (riderId) {
+      return this.prisma.rideRequest.findMany({
+        where: {
+          OR: [
+            {
+              riderId: riderId,
+              isInvitation: false
+            },
+            {
+              ride: {
+                driverId: riderId
+              },
+              isInvitation: true
+            }
+          ]
+        },
+        include: {
+          rider: {
+            select: { id: true, name: true, profilePic: true }
+          },
+          ride: {
+            select: {
+              id: true,
+              startPlaceName: true,
+              endPlaceName: true,
+              startTime: true,
+              vehicleType: true,
+              driver: {
+                select: { id: true, name: true, profilePic: true }
+              }
+            }
+          }
+        },
+        orderBy: {
+          createdAt: 'desc'
+        }
+      });
+    }
+
+    return this.prisma.rideRequest.findMany({
+      where: whereClause,
+      include: {
+        rider: {
+          select: { id: true, name: true, profilePic: true }
+        },
+        ride: {
+          select: {
+            id: true,
+            startPlaceName: true,
+            endPlaceName: true,
+            startTime: true,
+            vehicleType: true,
+            driver: {
+              select: { id: true, name: true, profilePic: true }
+            }
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
   }
 
   async updateRequestStatus(requestId: string, status: RideStatus, userId: string) {
@@ -428,102 +485,150 @@ export class MatchmakingService {
     });
     if (!req) throw new NotFoundException('Request not found');
 
-    if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
-      if (req.ride.driverId !== userId) {
-        throw new BadRequestException('Only the driver can accept or reject requests');
+    const buddyRequest = req.buddyRequestId ? await this.prisma.buddyRequest.findUnique({
+      where: { id: req.buddyRequestId },
+      include: { rider: true }
+    }) : null;
+
+    if (req.isInvitation) {
+      if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
+        if (req.riderId !== userId) {
+          throw new BadRequestException('Only the invited passenger can accept or reject this offer');
+        }
+      } else if (status === RideStatus.CANCELLED) {
+        if (req.ride.driverId !== userId) {
+          throw new BadRequestException('Only the driver can cancel/withdraw this offer');
+        }
       }
-    } else if (status === RideStatus.CANCELLED) {
-      if (req.riderId !== userId) {
-        throw new BadRequestException('Only the rider can cancel their request');
+    } else {
+      if (status === RideStatus.ACCEPTED || status === RideStatus.REJECTED) {
+        if (req.ride.driverId !== userId) {
+          throw new BadRequestException('Only the driver can accept or reject requests');
+        }
+      } else if (status === RideStatus.CANCELLED) {
+        if (req.riderId !== userId) {
+          throw new BadRequestException('Only the rider can cancel their request');
+        }
       }
     }
 
     if (status === RideStatus.ACCEPTED) {
       if (req.status !== RideStatus.ACCEPTED) {
-        if (req.ride.seatsAvailable < req.seats) {
-          throw new BadRequestException(`Not enough available seats. Only ${req.ride.seatsAvailable} remaining.`);
-        }
-        
-        const newSeatsAvailable = req.ride.seatsAvailable - req.seats;
-        let rideStatus = req.ride.status;
-        if (newSeatsAvailable === 0) {
-          rideStatus = RideStatus.ACCEPTED;
-        } else {
-          const otherRequestedCount = await this.prisma.rideRequest.count({
-            where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+        if (req.rideId) {
+          if (req.ride.seatsAvailable < req.seats) {
+            throw new BadRequestException(`Not enough available seats. Only ${req.ride.seatsAvailable} remaining.`);
+          }
+          
+                    const newSeatsAvailable = req.ride.seatsAvailable - req.seats;
+          let rideStatus = req.ride.status;
+          if (req.ride.vehicleType === 'CAB') {
+            rideStatus = RideStatus.ACCEPTED;
+          } else if (newSeatsAvailable === 0) {
+            rideStatus = RideStatus.ACCEPTED;
+          } else {
+            const otherRequestedCount = await this.prisma.rideRequest.count({
+              where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+            });
+            rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
+          }
+
+          await this.prisma.ride.update({
+            where: { id: req.rideId },
+            data: {
+              seatsAvailable: newSeatsAvailable,
+              status: rideStatus
+            }
           });
-          rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
         }
 
-        await this.prisma.ride.update({
-          where: { id: req.rideId },
-          data: {
-            seatsAvailable: newSeatsAvailable,
-            status: rideStatus
-          }
-        });
+        if (req.buddyRequestId) {
+          await this.prisma.buddyRequest.update({
+            where: { id: req.buddyRequestId },
+            data: { status: 'ACCEPTED' }
+          }).catch(err => {
+            console.error('Failed to update associated buddy request:', req.buddyRequestId, err);
+          });
+        }
       }
     } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED) {
       if (req.status === RideStatus.ACCEPTED) {
-        const newSeatsAvailable = req.ride.seatsAvailable + req.seats;
-        const otherRequestedCount = await this.prisma.rideRequest.count({
-          where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
-        });
-        const rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
+        if (req.rideId) {
+          const newSeatsAvailable = req.ride.seatsAvailable + req.seats;
+          const otherRequestedCount = await this.prisma.rideRequest.count({
+            where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+          });
+          const rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
 
-        await this.prisma.ride.update({
-          where: { id: req.rideId },
-          data: {
-            seatsAvailable: newSeatsAvailable,
-            status: rideStatus
-          }
-        });
-      } else if (req.status === RideStatus.REQUESTED) {
-        const pendingCount = await this.prisma.rideRequest.count({
-          where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
-        });
-        const acceptedCount = await this.prisma.rideRequest.count({
-          where: { rideId: req.rideId, status: RideStatus.ACCEPTED }
-        });
-        
-        let rideStatus: RideStatus = RideStatus.OPEN;
-        if (pendingCount > 0) {
-          rideStatus = RideStatus.REQUESTED;
-        } else if (acceptedCount > 0) {
-          rideStatus = RideStatus.ACCEPTED;
+          await this.prisma.ride.update({
+            where: { id: req.rideId },
+            data: {
+              seatsAvailable: newSeatsAvailable,
+              status: rideStatus
+            }
+          });
         }
-        
-        await this.prisma.ride.update({
-          where: { id: req.rideId },
-          data: { status: rideStatus }
-        });
+
+        if (req.buddyRequestId) {
+          await this.prisma.buddyRequest.update({
+            where: { id: req.buddyRequestId },
+            data: { status: 'OPEN' }
+          }).catch(err => {
+            console.error('Failed to revert associated buddy request status:', req.buddyRequestId, err);
+          });
+        }
       }
     }
 
     const updatedReq = await this.prisma.rideRequest.update({
       where: { id: requestId },
       data: { status },
-      select: { id: true, rideId: true, status: true, updatedAt: true },
+      select: { id: true, rideId: true, status: true, updatedAt: true, riderId: true, isInvitation: true, buddyRequestId: true },
     });
 
-    if (status === RideStatus.CANCELLED) {
-      this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
-      await this.chatService.sendNotificationToUser(
-        req.ride.driverId,
-        'Booking Cancelled',
-        'A rider has cancelled their booking for your ride.',
-        'ride_request_updated',
-        updatedReq
-      );
-    } else {
-      this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
-      await this.chatService.sendNotificationToUser(
-        req.riderId,
-        `Ride Request ${status}`,
-        `Your ride request status has been updated to ${status.toLowerCase()}.`,
-        'ride_request_updated',
-        updatedReq
-      );
+    try {
+      if (req.isInvitation) {
+        if (status === RideStatus.CANCELLED) {
+          this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+          await this.chatService.sendNotificationToUser(
+            req.riderId,
+            buddyRequest ? 'Cab Partner Request Cancelled' : 'Ride Invite Withdrawn',
+            buddyRequest ? 'A user has cancelled their request to book a cab with you.' : 'The driver has withdrawn their ride invite.',
+            'ride_request_updated',
+            updatedReq
+          );
+        } else {
+          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
+          await this.chatService.sendNotificationToUser(
+            req.ride.driverId,
+            buddyRequest ? `Cab Partner Request ${status}` : `Ride Invite ${status}`,
+            buddyRequest ? `The passenger has ${status.toLowerCase()} your cab booking request.` : `The passenger has ${status.toLowerCase()} your ride invitation.`,
+            'ride_request_updated',
+            updatedReq
+          );
+        }
+      } else {
+        if (status === RideStatus.CANCELLED) {
+          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
+          await this.chatService.sendNotificationToUser(
+            req.ride.driverId,
+            'Booking Cancelled',
+            'A rider has cancelled their booking for your ride.',
+            'ride_request_updated',
+            updatedReq
+          );
+        } else {
+          this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+          await this.chatService.sendNotificationToUser(
+            req.riderId,
+            `Ride Request ${status}`,
+            `Your ride request has been ${status.toLowerCase()}.`,
+            'ride_request_updated',
+            updatedReq
+          );
+        }
+      }
+    } catch (e) {
+      console.error('Failed to send status update notification:', e);
     }
 
     return updatedReq;
@@ -577,11 +682,28 @@ export class MatchmakingService {
   }
 
   async listBuddyRequests(userId: string, page?: number, limit?: number) {
+    const involvedRequests = await this.prisma.rideRequest.findMany({
+      where: {
+        buddyRequestId: { not: null },
+        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        OR: [
+          { riderId: userId },
+          { ride: { driverId: userId } }
+        ]
+      },
+      select: { buddyRequestId: true }
+    });
+
+    const excludedBuddyRequestIds = involvedRequests
+      .map(r => r.buddyRequestId)
+      .filter((id): id is string => id !== null);
+
     const prismaParams: any = {
       where: {
         riderId: { not: userId },
         status: 'OPEN',
-        startTime: { gte: new Date() }
+        startTime: { gte: new Date() },
+        ...(excludedBuddyRequestIds.length > 0 ? { id: { notIn: excludedBuddyRequestIds } } : {})
       },
       include: {
         rider: {
@@ -681,35 +803,183 @@ export class MatchmakingService {
         riderStartName: buddyRequest.startPlaceName,
         riderEndName: buddyRequest.endPlaceName,
         riderStartTime: buddyRequest.startTime,
-        status: RideStatus.ACCEPTED,
+        status: RideStatus.REQUESTED,
         fareCents: 1000,
-        seats: buddyRequest.seatsNeeded
+        seats: buddyRequest.seatsNeeded,
+        isInvitation: true,
+        buddyRequestId: buddyRequestId
       }
     });
 
-    await this.prisma.ride.update({
-      where: { id: ride.id },
-      data: {
-        seatsAvailable: ride.seatsAvailable - buddyRequest.seatsNeeded,
-        status: RideStatus.ACCEPTED
-      }
-    });
-
-    await this.prisma.buddyRequest.update({
-      where: { id: buddyRequestId },
-      data: { status: 'ACCEPTED' }
-    });
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "RideRequest"
+      SET "riderStart" = br."startPoint",
+          "riderEnd" = br."endPoint"
+      FROM "BuddyRequest" br
+      WHERE "RideRequest".id = ${newRequest.id} AND br.id = ${buddyRequestId}
+    `);
 
     try {
+      this.gateway.notifyUser(buddyRequest.riderId, 'new_ride_invite', newRequest);
       await this.chatService.sendNotificationToUser(
         buddyRequest.riderId,
-        'Ride Offer Accepted',
-        'Your buddy request has been accepted by a driver!',
-        'ride_request_updated',
+        'New Ride Invite',
+        'A driver has invited you to join their ride.',
+        'new_ride_invite',
         newRequest
       );
     } catch (e) {
       console.error('Failed to send notification to rider:', buddyRequest.riderId, e);
+    }
+
+    return newRequest;
+  }
+
+  async listReceivedRequests(userId: string) {
+    const myBuddies = await this.prisma.buddyRequest.findMany({
+      where: { riderId: userId }
+    });
+    const myBuddyIds = myBuddies.map(b => b.id);
+
+    return this.prisma.rideRequest.findMany({
+      where: {
+        OR: [
+          {
+            ride: {
+              driverId: userId
+            },
+            isInvitation: false
+          },
+          {
+            buddyRequestId: { in: myBuddyIds },
+            isInvitation: true
+          }
+        ]
+      },
+      include: {
+        rider: {
+          select: { id: true, name: true, profilePic: true }
+        },
+        ride: {
+          select: {
+            id: true,
+            startPlaceName: true,
+            endPlaceName: true,
+            startTime: true,
+            vehicleType: true,
+            driver: {
+              select: { id: true, name: true, profilePic: true }
+            }
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+  }
+
+  async requestBuddyMatch(buddyRequestId: string, requesterId: string) {
+    const buddyRequest = await this.prisma.buddyRequest.findUnique({
+      where: { id: buddyRequestId },
+      include: { rider: true }
+    });
+    if (!buddyRequest) throw new NotFoundException('Buddy request not found');
+    if (buddyRequest.riderId === requesterId) {
+      throw new BadRequestException('You cannot request to match with your own buddy request.');
+    }
+    if (buddyRequest.status !== 'OPEN') {
+      throw new BadRequestException('This buddy request is no longer open.');
+    }
+
+    const existing = await this.prisma.rideRequest.findFirst({
+      where: {
+        buddyRequestId: buddyRequestId,
+        ride: {
+          driverId: requesterId
+        },
+        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
+      }
+    });
+    if (existing) throw new BadRequestException('You have already sent a request to match with this buddy.');
+
+    const newRide = await this.prisma.ride.create({
+      data: {
+        id: randomUUID(),
+        driverId: requesterId,
+        seatsAvailable: 3,
+        chargeCents: 0,
+        startTime: buddyRequest.startTime,
+        endTime: new Date(buddyRequest.startTime.getTime() + 60 * 60 * 1000),
+        startPlaceName: buddyRequest.startPlaceName,
+        endPlaceName: buddyRequest.endPlaceName,
+        vehicleType: 'CAB',
+        vehicleCapacity: 4,
+        status: RideStatus.OPEN
+      }
+    });
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "Ride"
+      SET "startPoint" = br."startPoint",
+          "endPoint" = br."endPoint",
+          "routeLine" = ST_SetSRID(ST_MakeLine(br."startPoint", br."endPoint"), 4326)
+      FROM "BuddyRequest" br
+      WHERE "Ride".id = ${newRide.id} AND br.id = ${buddyRequestId}
+    `);
+
+    const newRequest = await this.prisma.rideRequest.create({
+      data: {
+        id: randomUUID(),
+        rideId: newRide.id,
+        riderId: buddyRequest.riderId,
+        riderStartName: buddyRequest.startPlaceName,
+        riderEndName: buddyRequest.endPlaceName,
+        riderStartTime: buddyRequest.startTime,
+        status: RideStatus.REQUESTED,
+        seats: buddyRequest.seatsNeeded,
+        isInvitation: true,
+        fareCents: 0,
+        buddyRequestId: buddyRequestId
+      },
+      include: {
+        rider: {
+          select: { id: true, name: true, profilePic: true }
+        },
+        ride: {
+          select: {
+            id: true,
+            startPlaceName: true,
+            endPlaceName: true,
+            startTime: true,
+            vehicleType: true,
+            driver: {
+              select: { id: true, name: true, profilePic: true }
+            }
+          }
+        }
+      }
+    });
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "RideRequest"
+      SET "riderStart" = br."startPoint",
+          "riderEnd" = br."endPoint"
+      FROM "BuddyRequest" br
+      WHERE "RideRequest".id = ${newRequest.id} AND br.id = ${buddyRequestId}
+    `);
+
+    try {
+      this.gateway.notifyUser(buddyRequest.riderId, 'new_buddy_request', newRequest);
+      await this.chatService.sendNotificationToUser(
+        buddyRequest.riderId,
+        'New Cab Buddy Request',
+        `A user wants to book a cab with you.`,
+        'new_buddy_request',
+        newRequest
+      );
+    } catch (e) {
+      console.error('Failed to notify buddy:', buddyRequest.riderId, e);
     }
 
     return newRequest;
