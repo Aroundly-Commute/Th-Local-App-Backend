@@ -295,11 +295,23 @@ export class RidesService {
     const distance_km = distanceMeters / 1000.0;
     const co2_saved_kg = distance_km * 0.12;
 
+    const { calculateFare } = require('../../common/utils/pricing');
+    const estimatedFare = calculateFare({
+      distanceMeters,
+      deviationMeters: 0,
+      startPlaceName: ride.startPlaceName,
+      endPlaceName: ride.endPlaceName,
+      vehicleType: ride.vehicleType || 'CAR',
+      vehicleCapacity: ride.vehicleCapacity || 5,
+      fuelType: ride.fuelType || 'Petrol'
+    });
+
     return {
       ...ride,
       distance_km,
       co2_saved_kg,
       my_review_rating,
+      estimatedFare,
     };
   }
 
