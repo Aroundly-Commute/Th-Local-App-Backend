@@ -65,6 +65,7 @@ export class MatchmakingService {
     const ridesRows = await this.prisma.$queryRaw<
       Array<{
         id: string;
+        driverId: string;
         driverName: string;
         driverAvatar: string | null;
         driverGender: string | null;
@@ -97,6 +98,7 @@ export class MatchmakingService {
         )
       SELECT
         r."id",
+        r."driverId",
         u."name" as "driverName",
         u."profilePic" as "driverAvatar",
         u."gender" as "driverGender",
