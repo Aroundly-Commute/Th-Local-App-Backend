@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UnauthorizedException, Get, Request, UseGuards, Patch, BadRequestException, Param, NotFoundException } from '@nestjs/common';
+import { Controller, Post, Body, UnauthorizedException, Get, Request, UseGuards, Patch, BadRequestException, Param, NotFoundException, Query } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
@@ -103,6 +103,25 @@ export class AuthController {
       throw new NotFoundException('User profile not found');
     }
     return await this.formatUser(user);
+  }
+
+  @Get('check-phone')
+  @UseGuards(FirebaseAuthGuard)
+  async checkPhone(@Request() req: any, @Query('phoneNumber') phoneNumber: string) {
+    if (!phoneNumber) {
+      throw new BadRequestException('Phone number is required');
+    }
+    const cleanPhone = phoneNumber.trim();
+    const formatted = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
+    
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        phoneNumber: formatted,
+        id: { not: req.user.id }
+      }
+    });
+    
+    return { exists: !!existing };
   }
 
   @Post('vehicle')
@@ -286,6 +305,19 @@ export class AuthController {
           }
         }
 
+        if (!user && decodedToken.phone_number) {
+          user = await this.prisma.user.findUnique({
+            where: { phoneNumber: decodedToken.phone_number },
+          });
+          if (user) {
+            user = await this.prisma.user.update({
+              where: { id: user.id },
+              data: { firebaseUid: decodedToken.uid }
+            });
+            console.log(`[AUTH] Linked existing user ${decodedToken.phone_number} with firebaseUid ${decodedToken.uid} in google-route`);
+          }
+        }
+
         if (!user) {
           user = await this.prisma.user.create({
             data: {
@@ -316,30 +348,65 @@ export class AuthController {
     };
   }
 
+  @Patch('profile/phone')
+  @UseGuards(FirebaseAuthGuard)
+  async verifyAndLinkPhone(@Request() req: any, @Body() body: { phoneNumber: string; code: string }) {
+    const { phoneNumber, code } = body;
+    if (!phoneNumber || !code) {
+      throw new BadRequestException('Phone number and OTP code are required');
+    }
+    const cleanPhone = phoneNumber.trim();
+    const cleanCode = code.trim();
+
+    // Verify OTP code in DB
+    const record = await this.prisma.verificationCode.findFirst({
+      where: {
+        phoneNumber: cleanPhone,
+        code: cleanCode,
+        expiresAt: { gte: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!record) {
+      throw new BadRequestException('Invalid or expired OTP verification code');
+    }
+
+    // Clean up
+    await this.prisma.verificationCode.deleteMany({
+      where: { phoneNumber: cleanPhone },
+    });
+
+    // Check if phone number is already taken by another account
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        phoneNumber: cleanPhone,
+        id: { not: req.user.id }
+      }
+    });
+    if (existing) {
+      throw new BadRequestException('This phone number is already registered with another account');
+    }
+
+    // Update phone number of current user
+    const updatedUser = await this.prisma.user.update({
+      where: { id: req.user.id },
+      data: { phoneNumber: cleanPhone }
+    });
+
+    return await this.formatUser(updatedUser);
+  }
+
   @Patch('profile')
   @UseGuards(FirebaseAuthGuard)
   async updateProfile(@Request() req: any, @Body() body: any) {
     const { name, phoneNumber, avatarUrl, profilePic, gender, society, workplace, bio } = body;
     console.log(`[AUTH] Updating profile for user ${req.user.id}:`, body);
 
-    let cleanPhone: string | null | undefined = undefined;
-    if (phoneNumber !== undefined && phoneNumber !== null) {
-      if (phoneNumber === '') {
-        cleanPhone = null;
-      } else {
-        const trimmed = phoneNumber.trim();
-        cleanPhone = trimmed.startsWith('+') ? trimmed : `+91${trimmed}`;
-
-        // Check if phone number is already registered to ANOTHER user
-        const existing = await this.prisma.user.findFirst({
-          where: {
-            phoneNumber: cleanPhone,
-            id: { not: req.user.id }
-          }
-        });
-        if (existing) {
-          throw new BadRequestException('This phone number is already registered with another account');
-        }
+    if (phoneNumber !== undefined && phoneNumber !== null && phoneNumber !== '') {
+      const trimmed = phoneNumber.trim();
+      const cleanPhone = trimmed.startsWith('+') ? trimmed : `+91${trimmed}`;
+      if (cleanPhone !== req.user.phoneNumber) {
+        throw new BadRequestException('Phone number must be verified through the OTP verification flow');
       }
     }
 
@@ -347,7 +414,6 @@ export class AuthController {
       where: { id: req.user.id },
       data: {
         name: name !== undefined ? name : undefined,
-        phoneNumber: cleanPhone !== undefined ? cleanPhone : undefined,
         profilePic: (avatarUrl || profilePic) !== undefined ? (avatarUrl || profilePic) : undefined,
         gender: gender !== undefined ? gender : undefined,
         society: society !== undefined ? society : undefined,

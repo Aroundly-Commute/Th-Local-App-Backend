@@ -39,6 +39,24 @@ export class MatchmakingController {
     return this.mm.updateRequestStatus(id, body.status, req.user.id);
   }
 
+  @Patch('requests/:id/start')
+  async startRideRequest(
+    @Param('id') id: string,
+    @Body() body: { otp: string },
+    @Request() req: any,
+  ) {
+    return this.mm.startRideRequest(id, body.otp, req.user.id);
+  }
+
+  @Patch('requests/:id/complete')
+  async completeRideRequest(
+    @Param('id') id: string,
+    @Body() body: { actualFare?: number },
+    @Request() req: any,
+  ) {
+    return this.mm.completeRideRequest(id, body.actualFare, req.user.id);
+  }
+
   @Patch('buddies/:id')
   async updateBuddyRequest(
     @Param('id') id: string,

@@ -371,6 +371,28 @@ export class RidesService {
       include: { rider: true }
     });
 
+    const myBuddyIds = buddyRequests.map(b => b.id);
+    const receivedRequests = await this.prisma.rideRequest.findMany({
+      where: {
+        OR: [
+          {
+            ride: {
+              driverId: userId
+            },
+            isInvitation: false
+          },
+          {
+            buddyRequestId: { in: myBuddyIds },
+            isInvitation: true
+          }
+        ]
+      },
+      include: {
+        rider: true,
+        ride: { include: { driver: true } }
+      }
+    });
+
     const writtenReviews = await this.prisma.review.findMany({
       where: { fromUserId: userId }
     });
@@ -380,6 +402,42 @@ export class RidesService {
         reviewMap.set(`${rev.rideId}:${rev.toUserId}`, rev.rating);
       }
     });
+
+    // Ensure all ACCEPTED/STARTED requests have OTPs generated
+    for (const rr of riderRequests) {
+      if ((rr.status === 'ACCEPTED' || rr.status === 'STARTED') && !rr.otp) {
+        const randomOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        rr.otp = randomOtp;
+        await this.prisma.rideRequest.update({
+          where: { id: rr.id },
+          data: { otp: randomOtp }
+        });
+      }
+    }
+
+    for (const rr of receivedRequests) {
+      if ((rr.status === 'ACCEPTED' || rr.status === 'STARTED') && !rr.otp) {
+        const randomOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        rr.otp = randomOtp;
+        await this.prisma.rideRequest.update({
+          where: { id: rr.id },
+          data: { otp: randomOtp }
+        });
+      }
+    }
+
+    for (const r of driverRides) {
+      for (const rr of r.requests) {
+        if ((rr.status === 'ACCEPTED' || rr.status === 'STARTED') && !rr.otp) {
+          const randomOtp = Math.floor(1000 + Math.random() * 9000).toString();
+          rr.otp = randomOtp;
+          await this.prisma.rideRequest.update({
+            where: { id: rr.id },
+            data: { otp: randomOtp }
+          });
+        }
+      }
+    }
 
     const upcoming: any[] = [];
     const past: any[] = [];
@@ -397,7 +455,7 @@ export class RidesService {
     riderRequests.forEach(rr => {
       const mapped = this.mapRiderRequest(rr, reviewMap);
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
-      if (rr.status === 'ACCEPTED') {
+      if (rr.status === 'ACCEPTED' || rr.status === 'STARTED') {
         if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
           upcoming.push(mapped);
         } else {
@@ -409,8 +467,32 @@ export class RidesService {
         } else {
           past.push(mapped);
         }
-      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
+      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED' || rr.status === 'COMPLETED') {
         past.push(mapped);
+      }
+    });
+
+    receivedRequests.forEach(rr => {
+      const isDriver = rr.ride.driverId === userId;
+      const mapped = isDriver
+        ? this.mapReceivedRequest(rr, reviewMap)
+        : this.mapRiderRequest(rr, reviewMap);
+
+      const rideStartTime = rr.riderStartTime || rr.ride.startTime;
+      if (rr.status === 'REQUESTED') {
+        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+          if (!requested.some(item => item.request_id === rr.id)) {
+            requested.push(mapped);
+          }
+        } else {
+          if (!past.some(item => item.request_id === rr.id)) {
+            past.push(mapped);
+          }
+        }
+      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
+        if (!past.some(item => item.request_id === rr.id)) {
+          past.push(mapped);
+        }
       }
     });
 
@@ -716,7 +798,7 @@ export class RidesService {
   private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
     const isPastRide = r.startTime < new Date();
     const acceptedPassengers = (r.requests || []).filter((rr: any) =>
-      rr.status === 'ACCEPTED' || (!isPastRide && rr.status === 'REQUESTED')
+      rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED'
     );
     const firstPassenger = acceptedPassengers[0];
     const chat_id = firstPassenger ? getDeterministicChatId(r.driverId, firstPassenger.riderId) : null;
@@ -747,6 +829,10 @@ export class RidesService {
         chat_id: getDeterministicChatId(r.driverId, rr.riderId),
         seats: rr.seats,
         my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
+        otp: rr.otp,
+        actual_fare: rr.actualFare,
+        rider_share: rr.riderShare,
+        driver_share: rr.driverShare,
       })),
       chat_id,
       peer_name,
@@ -778,6 +864,42 @@ export class RidesService {
       peer_avatar: r.driver?.profilePic || null,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
+      otp: rr.otp,
+      actual_fare: rr.actualFare,
+      rider_share: rr.riderShare,
+      driver_share: rr.driverShare,
+    };
+  }
+
+  private mapReceivedRequest(rr: any, reviewMap?: Map<string, number>) {
+    const r = rr.ride;
+    return {
+      id: r.id,
+      request_id: rr.id,
+      role: 'driver',
+      rider_id: rr.riderId,
+      request_status: rr.status,
+      driver_id: r.driverId,
+      driver_name: r.driver?.name || 'Driver',
+      driver_avatar: r.driver?.profilePic || null,
+      driver_gender: r.driver?.gender || null,
+      driver_rating: r.driver?.rating ?? 5.0,
+      origin: rr.riderStartName || r.startPlaceName,
+      destination: rr.riderEndName || r.endPlaceName,
+      departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
+      seats_available: r.seatsAvailable,
+      price_per_seat: r.chargeCents / 100,
+      status: r.status,
+      vehicle_type: r.vehicleType,
+      chat_id: getDeterministicChatId(r.driverId, rr.riderId),
+      peer_name: rr.rider?.name || 'Passenger',
+      peer_avatar: rr.rider?.profilePic || null,
+      is_invitation: rr.isInvitation || false,
+      my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
+      otp: rr.otp,
+      actual_fare: rr.actualFare,
+      rider_share: rr.riderShare,
+      driver_share: rr.driverShare,
     };
   }
 }
