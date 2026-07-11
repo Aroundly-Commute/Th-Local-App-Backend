@@ -14,6 +14,8 @@ enum RideStatus {
   ACCEPTED
   REJECTED
   CANCELLED
+  STARTED
+  COMPLETED
 }
 
 model Ride {
@@ -75,6 +77,13 @@ model RideRequest {
 
   isInvitation   Boolean    @default(false)
   buddyRequestId String?
+
+  otp            String?
+  actualFare     Float?
+  riderShare     Float?
+  driverShare    Float?
+  startedAt      DateTime?
+  completedAt    DateTime?
 
   @@index([rideId])
 }

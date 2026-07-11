@@ -581,9 +581,14 @@ export class MatchmakingService {
       }
     }
 
+    const updateData: any = { status };
+    if (status === RideStatus.ACCEPTED) {
+      updateData.otp = Math.floor(1000 + Math.random() * 9000).toString();
+    }
+
     const updatedReq = await this.prisma.rideRequest.update({
       where: { id: requestId },
-      data: { status },
+      data: updateData,
       select: { id: true, rideId: true, status: true, updatedAt: true, riderId: true, isInvitation: true, buddyRequestId: true },
     });
 
@@ -985,6 +990,118 @@ export class MatchmakingService {
     }
 
     return newRequest;
+  }
+
+  async startRideRequest(requestId: string, otp: string, userId: string) {
+    const req = await this.prisma.rideRequest.findUnique({
+      where: { id: requestId },
+      include: { ride: true }
+    });
+    if (!req) throw new NotFoundException('Ride request not found');
+
+    if (req.status !== RideStatus.ACCEPTED) {
+      throw new BadRequestException('Ride request must be ACCEPTED before starting');
+    }
+
+    if (!req.otp || req.otp !== otp) {
+      throw new BadRequestException('Invalid OTP. Please try again.');
+    }
+
+    const updated = await this.prisma.rideRequest.update({
+      where: { id: requestId },
+      data: {
+        status: RideStatus.STARTED,
+        startedAt: new Date()
+      },
+      include: {
+        ride: true,
+        rider: true
+      }
+    });
+
+    await this.prisma.ride.update({
+      where: { id: req.rideId },
+      data: { status: RideStatus.STARTED }
+    });
+
+    return updated;
+  }
+
+  async completeRideRequest(requestId: string, actualFare: number | undefined, userId: string) {
+    const req = await this.prisma.rideRequest.findUnique({
+      where: { id: requestId },
+      include: { ride: { include: { driver: true } } }
+    });
+    if (!req) throw new NotFoundException('Ride request not found');
+
+    if (req.status !== RideStatus.STARTED) {
+      throw new BadRequestException('Ride request must be STARTED before completing');
+    }
+
+    let riderShare = 0;
+    let driverShare = 0;
+
+    if (req.ride.vehicleType === 'CAB') {
+      if (!actualFare || actualFare <= 0) {
+        throw new BadRequestException('Cab amount is required to complete cab sharing ride');
+      }
+
+      // Calculate split based on distance
+      const driverDistResult = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+        SELECT ST_Distance(r."startPoint"::geography, r."endPoint"::geography) as distance
+        FROM "Ride" r
+        WHERE r.id = ${req.rideId}
+      `);
+
+      const riderDistResult = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+        SELECT ST_Distance(rr."riderStart"::geography, rr."riderEnd"::geography) as distance
+        FROM "RideRequest" rr
+        WHERE rr.id = ${requestId}
+      `);
+
+      const d_ride = driverDistResult?.[0]?.distance || 1000;
+      const d_rider = riderDistResult?.[0]?.distance || 1000;
+
+      const totalDist = d_ride + d_rider;
+      if (totalDist > 0) {
+        riderShare = Math.round((actualFare * d_rider) / totalDist * 100) / 100;
+        driverShare = Math.round((actualFare * d_ride) / totalDist * 100) / 100;
+      } else {
+        riderShare = actualFare / 2;
+        driverShare = actualFare / 2;
+      }
+    }
+
+    const updated = await this.prisma.rideRequest.update({
+      where: { id: requestId },
+      data: {
+        status: RideStatus.COMPLETED,
+        completedAt: new Date(),
+        actualFare: actualFare || null,
+        riderShare: riderShare || null,
+        driverShare: driverShare || null
+      },
+      include: {
+        ride: true,
+        rider: true
+      }
+    });
+
+    const activeRequests = await this.prisma.rideRequest.count({
+      where: {
+        rideId: req.rideId,
+        status: { in: [RideStatus.ACCEPTED, RideStatus.STARTED] }
+      }
+    });
+
+    if (activeRequests === 0) {
+      await this.prisma.ride.update({
+        where: { id: req.rideId },
+        data: { status: RideStatus.COMPLETED }
+      });
+    }
+
+    return updated;
   }
 }
 

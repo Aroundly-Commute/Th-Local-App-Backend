@@ -57,6 +57,22 @@ export class FirebaseAuthGuard implements CanActivate {
             where: { firebaseUid: decodedToken.uid }
           });
           console.log(`[AUTH GUARD] User lookup by firebaseUid result: ${user ? 'FOUND (ID: ' + user.id + ', Role: ' + user.role + ')' : 'NOT FOUND'}`);
+
+          if (user && decodedToken.phone_number && user.phoneNumber !== decodedToken.phone_number) {
+            const existingPhone = await prisma.user.findUnique({
+              where: { phoneNumber: decodedToken.phone_number }
+            });
+            if (existingPhone) {
+              console.warn(`[AUTH GUARD] Cannot sync phone number: ${decodedToken.phone_number} is already linked to user ID ${existingPhone.id}`);
+            } else {
+              console.log(`[AUTH GUARD] Phone number mismatch between token (${decodedToken.phone_number}) and DB (${user.phoneNumber}). Syncing DB...`);
+              user = await prisma.user.update({
+                where: { id: user.id },
+                data: { phoneNumber: decodedToken.phone_number }
+              });
+              console.log(`[AUTH GUARD] Database phone number successfully synchronized.`);
+            }
+          }
           
           if (!user && decodedToken.email) {
             console.log(`[AUTH GUARD] User not found by firebaseUid. Looking up by email instead: ${decodedToken.email}`);
@@ -72,6 +88,23 @@ export class FirebaseAuthGuard implements CanActivate {
               console.log(`[AUTH GUARD] Successfully linked firebaseUid to existing user: ID: ${user.id}`);
             } else {
               console.log("[AUTH GUARD] User not found by email in DB.");
+            }
+          }
+
+          if (!user && decodedToken.phone_number) {
+            console.log(`[AUTH GUARD] User not found by firebaseUid. Looking up by phone number instead: ${decodedToken.phone_number}`);
+            user = await prisma.user.findUnique({
+              where: { phoneNumber: decodedToken.phone_number }
+            });
+            if (user) {
+              console.log(`[AUTH GUARD] User found by phone number: ${user.phoneNumber} (ID: ${user.id}). Linking firebaseUid: ${decodedToken.uid}...`);
+              user = await prisma.user.update({
+                where: { id: user.id },
+                data: { firebaseUid: decodedToken.uid }
+              });
+              console.log(`[AUTH GUARD] Successfully linked firebaseUid to existing user: ID: ${user.id}`);
+            } else {
+              console.log("[AUTH GUARD] User not found by phone number in DB.");
             }
           }
 
