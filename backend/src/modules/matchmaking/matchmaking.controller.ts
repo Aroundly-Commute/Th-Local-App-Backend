@@ -91,10 +91,16 @@ export class MatchmakingController {
     @Request() req: any,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('latitude') latitude?: string,
+    @Query('longitude') longitude?: string,
+    @Query('radius') radius?: string,
   ) {
     const pageNum = page ? parseInt(page, 10) : undefined;
     const limitNum = limit ? parseInt(limit, 10) : undefined;
-    return this.mm.listBuddyRequests(req.user.id, pageNum, limitNum);
+    const latNum = latitude ? parseFloat(latitude) : undefined;
+    const lngNum = longitude ? parseFloat(longitude) : undefined;
+    const radNum = radius ? parseFloat(radius) : undefined;
+    return this.mm.listBuddyRequests(req.user.id, pageNum, limitNum, latNum, lngNum, radNum);
   }
 }
 

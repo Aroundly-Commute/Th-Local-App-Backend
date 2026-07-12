@@ -7,6 +7,9 @@ const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key_123';
 const USE_FIREBASE_AUTH = process.env.USE_FIREBASE_AUTH !== 'false';
 
+// Cache for verified Firebase ID tokens to prevent duplicate expensive network verifications on refresh
+const tokenCache = new Map<string, { decodedToken: admin.auth.DecodedIdToken; expiresAt: number }>();
+
 @Injectable()
 export class FirebaseAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -48,9 +51,33 @@ export class FirebaseAuthGuard implements CanActivate {
       } else {
         console.log(`[AUTH GUARD] Fallback to Firebase Auth. USE_FIREBASE_AUTH value is: ${USE_FIREBASE_AUTH}`);
         if (USE_FIREBASE_AUTH) {
-          console.log("[AUTH GUARD] Calling admin.auth().verifyIdToken...");
-          const decodedToken = await admin.auth().verifyIdToken(token);
-          console.log(`[AUTH GUARD] Firebase ID Token successfully verified. Decoded token info: UID: ${decodedToken.uid}, Email: ${decodedToken.email}, Name: ${decodedToken.name}`);
+          // Check local token cache first
+          const now = Date.now();
+          const cached = tokenCache.get(token);
+          let decodedToken: admin.auth.DecodedIdToken;
+
+          if (cached && cached.expiresAt > now) {
+            console.log("[AUTH GUARD] Using cached verified Firebase ID Token.");
+            decodedToken = cached.decodedToken;
+          } else {
+            console.log("[AUTH GUARD] Calling admin.auth().verifyIdToken...");
+            decodedToken = await admin.auth().verifyIdToken(token);
+            console.log(`[AUTH GUARD] Firebase ID Token successfully verified. Decoded token info: UID: ${decodedToken.uid}, Email: ${decodedToken.email}, Name: ${decodedToken.name}`);
+            
+            // Cache the verified token payload until it expires
+            const expiresAt = (decodedToken.exp || 0) * 1000;
+            if (expiresAt > now) {
+              // Periodically prune cache if it gets too large
+              if (tokenCache.size > 1000) {
+                for (const [k, v] of tokenCache.entries()) {
+                  if (v.expiresAt <= now) {
+                    tokenCache.delete(k);
+                  }
+                }
+              }
+              tokenCache.set(token, { decodedToken, expiresAt });
+            }
+          }
           
           console.log(`[AUTH GUARD] Looking up database user by firebaseUid: ${decodedToken.uid}`);
           user = await prisma.user.findUnique({
@@ -112,7 +139,13 @@ export class FirebaseAuthGuard implements CanActivate {
             console.log("[AUTH GUARD] User does not exist. Creating new user record...");
             // Extract custom headers sent during first-time signup sync
             const requestedRole = request.headers['x-user-role'] || 'passenger';
-            const requestedName = request.headers['x-user-name'] || decodedToken.name || decodedToken.phone_number || 'Carpool User';
+            let requestedName = request.headers['x-user-name'] || decodedToken.name || '';
+            // If the resolved name is a phone number (starts with + or is all digits), use a placeholder
+            // so the user gets routed to the onboarding flow to set their real name
+            if (!requestedName || /^\+?\d+$/.test(requestedName.trim())) {
+              const phoneDigits = (decodedToken.phone_number || '').replace(/\D/g, '');
+              requestedName = `Aroundler ${phoneDigits.slice(-4) || '0000'}`;
+            }
 
             console.log(`[AUTH GUARD] Attempting user creation: name=${requestedName}, role=${requestedRole}, email=${decodedToken.email}`);
             user = await prisma.user.create({

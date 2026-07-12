@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { lineStringWkt, pointWkt } from '../../common/utils/geo';
 import { PublishRideDto } from './dto/publish-ride.dto';
 import { ChatService } from '../chat/chat.service';
+import { generateDeterministicId } from '../../common/utils/id';
 
 const getDeterministicChatId = (user1: string, user2: string) => {
   const sorted = [user1, user2].sort();
@@ -35,12 +36,15 @@ export class RidesService {
     const endWkt = pointWkt(dto.end);
     const routeWkt = lineStringWkt(dto.route);
 
+    const id = generateDeterministicId('ride', [driverId, dto.startPlaceName, dto.endPlaceName, startTime.toISOString()]);
+
     const overlappingDriverRides = await this.prisma.ride.findFirst({
       where: {
         driverId,
         status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
         startTime: { lt: endTime },
         endTime: { gt: startTime },
+        id: { not: id }
       }
     });
 
@@ -55,6 +59,7 @@ export class RidesService {
         ride: {
           startTime: { lt: endTime },
           endTime: { gt: startTime },
+          id: { not: id }
         }
       }
     });
@@ -63,7 +68,6 @@ export class RidesService {
       throw new BadRequestException('You already have a requested ride during this time window.');
     }
 
-    const id = randomUUID();
     const now = new Date();
 
     const userVehicle = await this.prisma.vehicle.findUnique({
@@ -74,6 +78,62 @@ export class RidesService {
     const vehicleCapacity = dto.vehicleCapacity || userVehicle?.capacity || 5;
     const fuelType = dto.fuelType || userVehicle?.fuelType || 'Petrol';
     const vehicleNumber = dto.vehicleNumber || userVehicle?.vehicleNumber || '';
+
+    const existingRide = await this.prisma.ride.findUnique({
+      where: { id }
+    });
+
+    if (existingRide) {
+      if (
+        existingRide.status === RideStatus.CANCELLED ||
+        existingRide.status === RideStatus.COMPLETED ||
+        existingRide.status === RideStatus.REJECTED
+      ) {
+        // Reactivate / overwrite the inactive ride using update returning statement
+        const rows = await this.prisma.$queryRaw<
+          Array<{
+            id: string;
+            createdAt: Date;
+            updatedAt: Date;
+            driverId: string;
+            seatsAvailable: number;
+            chargeCents: number;
+            startTime: Date;
+            endTime: Date;
+            startPlaceName: string;
+            endPlaceName: string;
+            status: RideStatus;
+            startPointGeoJson: string;
+            endPointGeoJson: string;
+            routeGeoJson: string;
+          }>
+        >(Prisma.sql`
+          UPDATE "Ride"
+          SET "updatedAt" = ${now},
+              "seatsAvailable" = ${dto.seatsAvailable},
+              "chargeCents" = ${dto.chargeCents},
+              "startTime" = ${startTime},
+              "endTime" = ${endTime},
+              "status" = ${RideStatus.OPEN}::"RideStatus",
+              "vehicleType" = ${vehicleType},
+              "vehicleCapacity" = ${vehicleCapacity},
+              "fuelType" = ${fuelType},
+              "vehicleNumber" = ${vehicleNumber},
+              "startPoint" = ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
+              "endPoint" = ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
+              "routeLine" = ST_SetSRID(ST_GeomFromText(${routeWkt}), 4326)
+          WHERE id = ${id}
+          RETURNING
+            "id","createdAt","updatedAt","driverId","seatsAvailable","chargeCents","startTime","endTime","startPlaceName","endPlaceName","status",
+            ST_AsGeoJSON("startPoint") as "startPointGeoJson",
+            ST_AsGeoJSON("endPoint") as "endPointGeoJson",
+            ST_AsGeoJSON("routeLine") as "routeGeoJson"
+        `);
+        return rows[0];
+      } else {
+        throw new BadRequestException('You already have an active ride with these details.');
+      }
+    }
 
     const rows = await this.prisma.$queryRaw<
       Array<{
@@ -112,13 +172,25 @@ export class RidesService {
     return rows[0];
   }
 
-  async listRides(status?: RideStatus, driverId?: string, excludeDriverId?: string, page?: number, limit?: number) {
+  async listRides(
+    status?: RideStatus,
+    driverId?: string,
+    excludeDriverId?: string,
+    page?: number,
+    limit?: number,
+    latitude?: number,
+    longitude?: number,
+    radius: number = 3000,
+  ) {
     const conditions: Prisma.Sql[] = [];
     if (status) {
       conditions.push(Prisma.sql`r."status" = ${status}::"RideStatus"`);
     } else {
       conditions.push(Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`);
     }
+
+    // Only show carpool rides (CAR) in Rides Near You. CAB rides are handled via cab share matchmaking.
+    conditions.push(Prisma.sql`r."vehicleType" = 'CAR'`);
 
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
     
@@ -131,9 +203,22 @@ export class RidesService {
           AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
       )`);
     }
+
+    // Vacancy check: Exclude rides that have any accepted ride requests
+    conditions.push(Prisma.sql`NOT EXISTS (
+      SELECT 1 FROM "RideRequest" rr
+      WHERE rr."rideId" = r."id"
+        AND rr."status" = 'ACCEPTED'::"RideStatus"
+    )`);
     
     // Only list rides that have not passed their start time
     conditions.push(Prisma.sql`r."startTime" >= NOW()`);
+
+    // Spatial filter check
+    if (latitude !== undefined && longitude !== undefined) {
+      const startWkt = `POINT(${longitude} ${latitude})`;
+      conditions.push(Prisma.sql`ST_DWithin(r."startPoint"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`);
+    }
 
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
     
@@ -227,7 +312,10 @@ export class RidesService {
         ST_AsGeoJSON(r."endPoint") as "endPointGeoJson",
         ST_AsGeoJSON(r."routeLine") as "routeGeoJson",
         r."vehicleType", r."vehicleCapacity", r."fuelType", r."vehicleNumber",
-        ST_Distance(r."startPoint"::geography, r."endPoint"::geography) as "distanceMeters"
+        COALESCE(
+          ST_Length(r."routeLine"::geography),
+          ST_Distance(r."startPoint"::geography, r."endPoint"::geography)
+        ) as "distanceMeters"
       FROM "Ride" r
       JOIN "User" u ON r."driverId" = u."id"
       WHERE r."id" = ${id}
@@ -237,13 +325,73 @@ export class RidesService {
     const ride = rows[0];
 
     const isPastRide = ride.startTime < new Date();
-    const requests = await this.prisma.rideRequest.findMany({
-      where: { 
-        rideId: id, 
-        status: { in: isPastRide ? ['ACCEPTED'] : ['REQUESTED', 'ACCEPTED'] as any } 
-      },
-      include: { rider: true }
-    });
+    // Raw SQL so we can include rider geometry for map rendering
+    const passengerRows = await (isPastRide
+      ? this.prisma.$queryRaw<
+          Array<{
+            request_id: string;
+            rider_id: string;
+            rider_name: string;
+            rider_avatar: string | null;
+            status: string;
+            fareCents: number;
+            seats: number;
+            riderStartGeoJson: string | null;
+            riderEndGeoJson: string | null;
+            riderStartName: string;
+            riderEndName: string;
+          }>
+        >(Prisma.sql`
+          SELECT
+            rr."id" as "request_id",
+            rr."riderId" as "rider_id",
+            u."name" as "rider_name",
+            u."profilePic" as "rider_avatar",
+            rr."status"::text,
+            rr."fareCents",
+            rr."seats",
+            rr."riderStartName",
+            rr."riderEndName",
+            ST_AsGeoJSON(rr."riderStart") as "riderStartGeoJson",
+            ST_AsGeoJSON(rr."riderEnd")   as "riderEndGeoJson"
+          FROM "RideRequest" rr
+          JOIN "User" u ON rr."riderId" = u."id"
+          WHERE rr."rideId" = ${id}
+            AND rr."status"::text = 'ACCEPTED'
+        `)
+      : this.prisma.$queryRaw<
+          Array<{
+            request_id: string;
+            rider_id: string;
+            rider_name: string;
+            rider_avatar: string | null;
+            status: string;
+            fareCents: number;
+            seats: number;
+            riderStartGeoJson: string | null;
+            riderEndGeoJson: string | null;
+            riderStartName: string;
+            riderEndName: string;
+          }>
+        >(Prisma.sql`
+          SELECT
+            rr."id" as "request_id",
+            rr."riderId" as "rider_id",
+            u."name" as "rider_name",
+            u."profilePic" as "rider_avatar",
+            rr."status"::text,
+            rr."fareCents",
+            rr."seats",
+            rr."riderStartName",
+            rr."riderEndName",
+            ST_AsGeoJSON(rr."riderStart") as "riderStartGeoJson",
+            ST_AsGeoJSON(rr."riderEnd")   as "riderEndGeoJson"
+          FROM "RideRequest" rr
+          JOIN "User" u ON rr."riderId" = u."id"
+          WHERE rr."rideId" = ${id}
+            AND rr."status"::text IN ('REQUESTED', 'ACCEPTED')
+        `)
+    );
 
     const driverReviews = await this.prisma.review.findMany({
       where: {
@@ -256,16 +404,20 @@ export class RidesService {
       passengerReviewMap.set(rev.toUserId, rev.rating);
     });
 
-    (ride as any).passengers = requests.map(rr => ({
-      request_id: rr.id,
-      rider_id: rr.riderId,
-      rider_name: (rr.rider as any)?.name || 'Passenger',
-      rider_avatar: (rr.rider as any)?.profilePic || null,
+    (ride as any).passengers = passengerRows.map(rr => ({
+      request_id: rr.request_id,
+      rider_id: rr.rider_id,
+      rider_name: rr.rider_name || 'Passenger',
+      rider_avatar: rr.rider_avatar || null,
       status: rr.status,
-      chat_id: getDeterministicChatId(ride.driverId, rr.riderId),
+      chat_id: getDeterministicChatId(ride.driverId, rr.rider_id),
       fareCents: rr.fareCents,
       seats: rr.seats,
-      my_review_rating: passengerReviewMap.get(rr.riderId) || null
+      riderStartName: rr.riderStartName,
+      riderEndName: rr.riderEndName,
+      riderStartGeoJson: rr.riderStartGeoJson || null,
+      riderEndGeoJson: rr.riderEndGeoJson || null,
+      my_review_rating: passengerReviewMap.get(rr.rider_id) || null,
     }));
 
     let my_review_rating: number | null = null;
@@ -316,6 +468,11 @@ export class RidesService {
   }
 
   async setRideStatus(id: string, status: RideStatus) {
+    const ride = await this.prisma.ride.findUnique({
+      where: { id }
+    });
+    if (!ride) throw new NotFoundException('Ride not found');
+
     const updated = await this.prisma.ride.update({
       where: { id },
       data: { status },
@@ -323,6 +480,23 @@ export class RidesService {
     });
 
     if (status === RideStatus.CANCELLED) {
+      // Also cancel the driver's own BuddyRequest in this time window
+      const driverBuddyRequestId = generateDeterministicId('buddy', [
+        ride.driverId,
+        ride.startPlaceName,
+        ride.endPlaceName,
+        ride.startTime.toISOString(),
+      ]);
+
+      try {
+        await this.prisma.buddyRequest.update({
+          where: { id: driverBuddyRequestId },
+          data: { status: 'CANCELLED' }
+        });
+      } catch (e) {
+        // Safe to ignore if no buddy request exists for this ride
+      }
+
       const activeRequests = await this.prisma.rideRequest.findMany({
         where: { rideId: id, status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] } }
       });
@@ -353,12 +527,12 @@ export class RidesService {
   }
 
   async getMyRides(userId: string, page?: number, limit?: number) {
-    const driverRides = await this.prisma.ride.findMany({ 
+    const driverRides = await this.prisma.ride.findMany({
       where: { driverId: userId },
-      include: { 
+      include: {
         driver: true,
         requests: { include: { rider: true } }
-      } 
+      }
     });
 
     const riderRequests = await this.prisma.rideRequest.findMany({
@@ -449,6 +623,22 @@ export class RidesService {
         past.push(mapped);
       } else {
         upcoming.push(mapped);
+
+        // Find sent invitations in driverRides
+        r.requests.forEach(rr => {
+          if (rr.status === 'REQUESTED' && rr.isInvitation === true) {
+            (rr as any).ride = r; // Crucial fix: attach parent ride reference to avoid mapping crashes
+            const mappedInvitation = this.mapReceivedRequest(rr, reviewMap);
+            requested.push({
+              ...mappedInvitation,
+              section: 'sent',
+              requestType: r.vehicleType === 'CAB' ? 'sent_cab_share' : 'sent_ride_join',
+              peer_name: rr.rider?.name || 'Passenger',
+              peer_avatar: rr.rider?.profilePic || null,
+              peer_rating: rr.rider?.rating ?? 5.0,
+            });
+          }
+        });
       }
     });
 
@@ -463,7 +653,24 @@ export class RidesService {
         }
       } else if (rr.status === 'REQUESTED') {
         if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
-          requested.push(mapped);
+          // Push to upcoming so it shows in own upcoming tab as "Requested"
+          if (rr.isInvitation === false) {
+            upcoming.push(mapped);
+          }
+
+          if (rr.isInvitation === false) {
+            requested.push({
+              ...mapped,
+              section: 'sent',
+              requestType: 'sent_ride_join'
+            });
+          } else {
+            requested.push({
+              ...mapped,
+              section: 'received',
+              requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
+            });
+          }
         } else {
           past.push(mapped);
         }
@@ -481,8 +688,22 @@ export class RidesService {
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
       if (rr.status === 'REQUESTED') {
         if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
-          if (!requested.some(item => item.request_id === rr.id)) {
-            requested.push(mapped);
+          if (rr.isInvitation === false) {
+            if (!requested.some(item => item.request_id === rr.id)) {
+              requested.push({
+                ...mapped,
+                section: 'received',
+                requestType: 'received_ride_join'
+              });
+            }
+          } else {
+            if (!requested.some(item => item.request_id === rr.id)) {
+              requested.push({
+                ...mapped,
+                section: 'received',
+                requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
+              });
+            }
           }
         } else {
           if (!past.some(item => item.request_id === rr.id)) {
@@ -497,11 +718,38 @@ export class RidesService {
     });
 
     buddyRequests.forEach(br => {
-      // If the buddy request is accepted, it is represented as a ride request,
-      // so we skip it here to avoid showing duplicate cards in upcoming/past lists.
       if (br.status === 'ACCEPTED') {
         return;
       }
+
+      // Skip displaying buddy request if the user has an associated CAB ride in this window
+      const hasAssociatedCabRide = driverRides.some(dr =>
+        dr.vehicleType === 'CAB' &&
+        Math.abs(dr.startTime.getTime() - br.startTime.getTime()) < 2 * 60 * 60 * 1000
+      );
+      if (hasAssociatedCabRide) {
+        return;
+      }
+
+      // Skip displaying buddy request if the user has an active/pending ride request associated with it
+      const hasAssociatedRiderRequest = riderRequests.some(rr =>
+        rr.buddyRequestId === br.id &&
+        rr.status !== 'CANCELLED' &&
+        rr.status !== 'REJECTED'
+      );
+      if (hasAssociatedRiderRequest) {
+        return;
+      }
+
+      if (br.status === 'OPEN') {
+        const isDriverOfActiveCab = driverRides.some(dr =>
+          dr.vehicleType === 'CAB' && dr.status !== 'CANCELLED' && dr.status !== 'COMPLETED'
+        );
+        if (isDriverOfActiveCab) {
+          return;
+        }
+      }
+
       const mapped = {
         id: br.id,
         isBuddyRequest: true,
@@ -524,7 +772,8 @@ export class RidesService {
       if (br.status === 'CANCELLED' || br.startTime < new Date()) {
         past.push(mapped);
       } else if (br.status === 'OPEN') {
-        requested.push(mapped);
+        // Push open buddy requests ONLY to upcoming tab, NOT to requests tab
+        upcoming.push(mapped);
       } else {
         upcoming.push(mapped);
       }
@@ -570,12 +819,15 @@ export class RidesService {
 
     console.log(`[OfferRide Service] Local Time: ${date} ${time} | Calculated UTC: ${startTime.toISOString()}`);
 
+    const rideId = generateDeterministicId('ride', [userId, startName, endName, startTime.toISOString()]);
+
     const overlappingDriver = await this.prisma.ride.findFirst({
        where: {
          driverId: userId,
          status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
          startTime: { lt: endTime },
-         endTime: { gt: startTime }
+         endTime: { gt: startTime },
+         id: { not: rideId }
        }
     });
     if (overlappingDriver) throw new BadRequestException('You already have a published ride during this time window.');
@@ -586,7 +838,8 @@ export class RidesService {
          status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
          ride: {
            startTime: { lt: endTime },
-           endTime: { gt: startTime }
+           endTime: { gt: startTime },
+           id: { not: rideId }
          }
        }
     });
@@ -601,22 +854,53 @@ export class RidesService {
     const fuelType = userVehicle?.fuelType || 'Petrol';
     const vehicleNumber = userVehicle?.vehicleNumber || '';
 
-    const ride = await this.prisma.ride.create({
-      data: {
-        driverId: userId,
-        seatsAvailable: seats || vehicleCapacity || 3,
-        chargeCents: (price || 10) * 100,
-        startTime: startTime.toISOString(),
-        endTime: endTime.toISOString(),
-        startPlaceName: startName,
-        endPlaceName: endName,
-        status: RideStatus.OPEN,
-        vehicleType,
-        vehicleCapacity,
-        fuelType,
-        vehicleNumber,
-      }
+    const existingRide = await this.prisma.ride.findUnique({
+      where: { id: rideId }
     });
+
+    let ride;
+    if (existingRide) {
+      if (
+        existingRide.status === RideStatus.CANCELLED ||
+        existingRide.status === RideStatus.COMPLETED ||
+        existingRide.status === RideStatus.REJECTED
+      ) {
+        ride = await this.prisma.ride.update({
+          where: { id: rideId },
+          data: {
+            status: RideStatus.OPEN,
+            seatsAvailable: seats || vehicleCapacity || 3,
+            chargeCents: (price || 10) * 100,
+            startTime: startTime.toISOString(),
+            endTime: endTime.toISOString(),
+            vehicleType,
+            vehicleCapacity,
+            fuelType,
+            vehicleNumber,
+          }
+        });
+      } else {
+        throw new BadRequestException('You already have an active ride with these details.');
+      }
+    } else {
+      ride = await this.prisma.ride.create({
+        data: {
+          id: rideId,
+          driverId: userId,
+          seatsAvailable: seats || vehicleCapacity || 3,
+          chargeCents: (price || 10) * 100,
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          startPlaceName: startName,
+          endPlaceName: endName,
+          status: RideStatus.OPEN,
+          vehicleType,
+          vehicleCapacity,
+          fuelType,
+          vehicleNumber,
+        }
+      });
+    }
 
     if (startCoords && startCoords.length === 2 && endCoords && endCoords.length === 2) {
       await this.prisma.$executeRaw(Prisma.sql`
@@ -633,181 +917,163 @@ export class RidesService {
         FROM "Ride"
         WHERE id = ${ride.id}
       `);
-      const distanceMeters = distanceRow[0]?.distance || 0;
-      
-      const { calculateFare } = require('../../common/utils/pricing');
-      const fareInfo = calculateFare({
-        distanceMeters,
-        deviationMeters: 0,
-        startPlaceName: startName,
-        endPlaceName: endName,
-        vehicleType,
-        vehicleCapacity,
-        fuelType
-      });
-
-      await this.prisma.ride.update({
-        where: { id: ride.id },
-        data: {
-          chargeCents: fareInfo.finalFare * 100
-        }
-      });
+      if (distanceRow && distanceRow.length > 0) {
+        const { calculateFare } = require('../../common/utils/pricing');
+        const calculated = calculateFare({
+          distanceMeters: distanceRow[0].distance,
+          deviationMeters: 0,
+          startPlaceName: startName,
+          endPlaceName: endName,
+          vehicleType,
+          vehicleCapacity,
+          fuelType,
+        });
+        ride = await this.prisma.ride.update({
+          where: { id: ride.id },
+          data: { chargeCents: calculated.finalFare * 100 }
+        });
+      }
     }
 
     return ride;
   }
 
-  async bookRide(id: string, userId: string, body?: any) {
-    const ride = await this.prisma.ride.findUnique({ where: { id } });
+  async bookRide(id: string, userId: string, body: any) {
+    const ride = await this.prisma.ride.findUnique({
+      where: { id },
+      include: { requests: true }
+    });
     if (!ride) throw new NotFoundException('Ride not found');
 
-    if (ride.driverId === userId) {
-      throw new BadRequestException('Cannot book your own ride');
-    }
+    const seatsCount = Number(body.seats) || 1;
+    let calculatedFareCents = (body.fareCents !== undefined && !isNaN(Number(body.fareCents)))
+      ? Math.round(Number(body.fareCents))
+      : undefined;
 
-    const { riderStartName, riderEndName, riderStartCoords, riderEndCoords, riderStartTime, seats } = body || {};
-    const requestedSeats = Number(seats) || 1;
-    if (requestedSeats <= 0) {
-      throw new BadRequestException('Invalid seats count');
-    }
-    if (ride.seatsAvailable < requestedSeats) {
-      throw new BadRequestException(`Not enough available seats. Only ${ride.seatsAvailable} remaining.`);
-    }
+    if (calculatedFareCents === undefined && body.riderStartCoords && body.riderEndCoords) {
+      const startWkt = pointWkt({ lng: Number(body.riderStartCoords[0]), lat: Number(body.riderStartCoords[1]) });
+      const endWkt = pointWkt({ lng: Number(body.riderEndCoords[0]), lat: Number(body.riderEndCoords[1]) });
 
-    const overlappingDriver = await this.prisma.ride.findFirst({
-       where: {
-         driverId: userId,
-         status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
-         startTime: { lt: ride.endTime },
-         endTime: { gt: ride.startTime }
-       }
-    });
-    if (overlappingDriver) throw new BadRequestException('You have a published ride overlapping with this time window.');
-
-    const overlappingRider = await this.prisma.rideRequest.findFirst({
-       where: {
-         riderId: userId,
-         status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
-         ride: {
-           startTime: { lt: ride.endTime },
-           endTime: { gt: ride.startTime }
-         }
-       }
-    });
-    if (overlappingRider) throw new BadRequestException('You already have a requested ride overlapping with this time window.');
-
-    let distanceMeters = 0;
-    let deviationMeters = 0;
-
-    if (riderStartCoords && riderStartCoords.length === 2 && riderEndCoords && riderEndCoords.length === 2) {
-      const wktStart = `POINT(${riderStartCoords[0]} ${riderStartCoords[1]})`;
-      const wktEnd = `POINT(${riderEndCoords[0]} ${riderEndCoords[1]})`;
-      
-      const geoResult = await this.prisma.$queryRaw<
-        Array<{ distance: number; deviation: number }>
+      const segmentRows = await this.prisma.$queryRaw<
+        Array<{ segmentMeters: number; startDistMeters: number; endDistMeters: number; vehicleType: string; vehicleCapacity: number; fuelType: string }>
       >(Prisma.sql`
-        SELECT 
-          ST_Distance(ST_SetSRID(ST_GeomFromText(${wktStart}), 4326)::geography, ST_SetSRID(ST_GeomFromText(${wktEnd}), 4326)::geography) as distance,
-          (ST_Distance("routeLine"::geography, ST_SetSRID(ST_GeomFromText(${wktStart}), 4326)::geography) + 
-           ST_Distance("routeLine"::geography, ST_SetSRID(ST_GeomFromText(${wktEnd}), 4326)::geography)) as deviation
-        FROM "Ride"
-        WHERE id = ${id}
+        SELECT
+          CASE
+            WHEN r."routeLine" IS NOT NULL THEN
+              ST_Length(
+                ST_LineSubstring(
+                  r."routeLine"::geography,
+                  LEAST(
+                    ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
+                    ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
+                  ),
+                  GREATEST(
+                    ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
+                    ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
+                  )
+                )
+              )
+            ELSE
+              ST_Distance(
+                ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography,
+                ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography
+              )
+          END AS "segmentMeters",
+          ST_Distance(r."routeLine"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography) AS "startDistMeters",
+          ST_Distance(r."routeLine"::geography, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography) AS "endDistMeters",
+          r."vehicleType", r."vehicleCapacity", r."fuelType"
+        FROM "Ride" r
+        WHERE r."id" = ${ride.id}
       `);
 
-      distanceMeters = geoResult[0]?.distance || 0;
-      deviationMeters = geoResult[0]?.deviation || 0;
-    } else {
-      // Fallback: use full route distance from the ride
-      const geoResult = await this.prisma.$queryRaw<
-        Array<{ distance: number }>
-      >(Prisma.sql`
-        SELECT ST_Distance("startPoint"::geography, "endPoint"::geography) as distance
-        FROM "Ride"
-        WHERE id = ${id}
-      `);
-      distanceMeters = geoResult[0]?.distance || 0;
-      deviationMeters = 0;
+      if (segmentRows && segmentRows.length > 0) {
+        const seg = segmentRows[0];
+        const segmentMeters = Number(seg.segmentMeters || 0);
+        const deviationMeters = Number(seg.startDistMeters || 0) + Number(seg.endDistMeters || 0);
+        const { calculateFare } = require('../../common/utils/pricing');
+        const fareBreakdown = calculateFare({
+          distanceMeters: segmentMeters,
+          deviationMeters,
+          startPlaceName: body.riderStartName || ride.startPlaceName,
+          endPlaceName: body.riderEndName || ride.endPlaceName,
+          vehicleType: seg.vehicleType || 'CAR',
+          vehicleCapacity: seg.vehicleCapacity || 5,
+          fuelType: seg.fuelType || 'Petrol',
+        });
+        calculatedFareCents = Math.round(fareBreakdown.finalFare * 100);
+      }
     }
 
-    const { calculateFare } = require('../../common/utils/pricing');
-    const fareInfo = calculateFare({
-      distanceMeters,
-      deviationMeters,
-      startPlaceName: riderStartName || ride.startPlaceName,
-      endPlaceName: riderEndName || ride.endPlaceName,
-      vehicleType: (ride as any).vehicleType || 'CAR',
-      vehicleCapacity: (ride as any).vehicleCapacity || 5,
-      fuelType: (ride as any).fuelType || 'Petrol'
-    });
+    if (calculatedFareCents === undefined) {
+      calculatedFareCents = ride.chargeCents;
+    }
 
-    const calculatedFareCents = fareInfo.finalFare * 100;
+    const exists = ride.requests.find(r => r.riderId === userId && r.status !== 'CANCELLED');
+    if (exists) return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
 
     const requestId = await this.prisma.rideRequest.create({
       data: {
-        rideId: id,
+        id: randomUUID(),
+        rideId: ride.id,
         riderId: userId,
-        riderStartName: riderStartName || ride.startPlaceName,
-        riderEndName: riderEndName || ride.endPlaceName,
-        riderStartTime: riderStartTime ? new Date(riderStartTime) : ride.startTime,
+        riderStartName: body.riderStartName || ride.startPlaceName,
+        riderEndName: body.riderEndName || ride.endPlaceName,
+        riderStartTime: body.riderStartTime ? new Date(body.riderStartTime) : ride.startTime,
         status: RideStatus.REQUESTED,
-        fareCents: calculatedFareCents,
-        seats: requestedSeats
+        fareCents: calculatedFareCents
       },
-      include: {
-        rider: true,
-      }
+      include: { rider: true }
     });
 
-    if (riderStartCoords && riderStartCoords.length === 2 && riderEndCoords && riderEndCoords.length === 2) {
-      const wktStart = `POINT(${riderStartCoords[0]} ${riderStartCoords[1]})`;
-      const wktEnd = `POINT(${riderEndCoords[0]} ${riderEndCoords[1]})`;
+    if (body.riderStartCoords && body.riderEndCoords) {
       await this.prisma.$executeRaw(Prisma.sql`
         UPDATE "RideRequest"
-        SET "riderStart" = ST_SetSRID(ST_GeomFromText(${wktStart}), 4326),
-            "riderEnd" = ST_SetSRID(ST_GeomFromText(${wktEnd}), 4326)
+        SET "riderStart" = ST_SetSRID(ST_MakePoint(${body.riderStartCoords[0]}, ${body.riderStartCoords[1]}), 4326),
+            "riderEnd" = ST_SetSRID(ST_MakePoint(${body.riderEndCoords[0]}, ${body.riderEndCoords[1]}), 4326)
         WHERE id = ${requestId.id}
       `);
     }
 
-    // Mark ride requested (simple phase-1 state machine)
-    await this.prisma.ride.update({
-      where: { id },
-      data: { status: RideStatus.REQUESTED }
-    });
-
-    await this.chatService.sendNotificationToUser(
-      ride.driverId,
-      'New Ride Booking Request',
-      `You have a new ride booking request from ${requestId.rider.name}.`,
-      'new_ride_request',
-      {
-        id: requestId.id,
-        rideId: ride.id,
-        riderName: requestId.rider.name,
-        riderStartName: requestId.riderStartName,
-        riderEndName: requestId.riderEndName,
-        riderStartTime: requestId.riderStartTime,
-        status: requestId.status,
-        fareCents: calculatedFareCents
-      }
-    );
+    try {
+      await this.chatService.sendNotificationToUser(
+        ride.driverId,
+        'New Booking Request',
+        `${requestId.rider.name} requested to join your ride.`,
+        'new_ride_request',
+        {
+          id: requestId.id,
+          rideId: ride.id,
+          riderName: requestId.rider.name,
+          riderStartName: requestId.riderStartName,
+          riderEndName: requestId.riderEndName,
+          riderStartTime: requestId.riderStartTime,
+          status: requestId.status,
+          fareCents: calculatedFareCents
+        }
+      );
+    } catch (e) {
+      console.error('Failed to send notification to driver:', ride.driverId, e);
+    }
 
     return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
   }
 
   private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
-    const isPastRide = r.startTime < new Date();
     const acceptedPassengers = (r.requests || []).filter((rr: any) =>
       rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED'
     );
+    const isConfirmed = acceptedPassengers.length > 0;
     const firstPassenger = acceptedPassengers[0];
+
     const chat_id = firstPassenger ? getDeterministicChatId(r.driverId, firstPassenger.riderId) : null;
-    const peer_name = firstPassenger ? firstPassenger.rider?.name : null;
-    const peer_avatar = firstPassenger ? firstPassenger.rider?.profilePic : null;
+    const peer_name = isConfirmed && firstPassenger ? firstPassenger.rider?.name : null;
+    const peer_avatar = isConfirmed && firstPassenger ? firstPassenger.rider?.profilePic : null;
+    const peer_rating = isConfirmed && firstPassenger ? (firstPassenger.rider?.rating ?? 5.0) : null;
 
     return {
       id: r.id,
       role: 'driver',
+      isConfirmed,
       driver_id: r.driverId,
       driver_name: r.driver?.name || 'Driver',
       driver_avatar: r.driver?.profilePic || null,
@@ -817,7 +1083,7 @@ export class RidesService {
       destination: r.endPlaceName,
       departure_time: r.startTime.toISOString(),
       seats_available: r.seatsAvailable,
-      price_per_seat: r.chargeCents / 100,
+      price_per_seat: isConfirmed && firstPassenger ? (firstPassenger.fareCents ? firstPassenger.fareCents / 100 : r.chargeCents / 100) : r.chargeCents / 100,
       status: r.status,
       vehicle_type: r.vehicleType,
       passengers: acceptedPassengers.map((rr: any) => ({
@@ -825,6 +1091,7 @@ export class RidesService {
         rider_id: rr.riderId,
         rider_name: rr.rider?.name || 'Passenger',
         rider_avatar: rr.rider?.profilePic || null,
+        rider_rating: rr.rider?.rating ?? 5.0,
         status: rr.status,
         chat_id: getDeterministicChatId(r.driverId, rr.riderId),
         seats: rr.seats,
@@ -837,15 +1104,19 @@ export class RidesService {
       chat_id,
       peer_name,
       peer_avatar,
+      peer_rating,
     };
   }
 
   private mapRiderRequest(rr: any, reviewMap?: Map<string, number>) {
     const r = rr.ride;
+    const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
+
     return {
       id: r.id,
       request_id: rr.id,
       role: 'rider',
+      isConfirmed,
       request_status: rr.status,
       driver_id: r.driverId,
       driver_name: r.driver?.name || 'Driver',
@@ -856,27 +1127,32 @@ export class RidesService {
       destination: rr.riderEndName || r.endPlaceName,
       departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
       seats_available: r.seatsAvailable,
-      price_per_seat: r.chargeCents / 100,
+      price_per_seat: rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100,
       status: r.status,
       vehicle_type: r.vehicleType,
       chat_id: getDeterministicChatId(r.driverId, rr.riderId),
       peer_name: r.driver?.name || 'Driver',
       peer_avatar: r.driver?.profilePic || null,
+      peer_rating: r.driver?.rating ?? 5.0,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
       otp: rr.otp,
       actual_fare: rr.actualFare,
       rider_share: rr.riderShare,
       driver_share: rr.driverShare,
+      buddyRequestId: rr.buddyRequestId,
     };
   }
 
   private mapReceivedRequest(rr: any, reviewMap?: Map<string, number>) {
     const r = rr.ride;
+    const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
+
     return {
       id: r.id,
       request_id: rr.id,
       role: 'driver',
+      isConfirmed,
       rider_id: rr.riderId,
       request_status: rr.status,
       driver_id: r.driverId,
@@ -888,18 +1164,20 @@ export class RidesService {
       destination: rr.riderEndName || r.endPlaceName,
       departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
       seats_available: r.seatsAvailable,
-      price_per_seat: r.chargeCents / 100,
+      price_per_seat: rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100,
       status: r.status,
       vehicle_type: r.vehicleType,
       chat_id: getDeterministicChatId(r.driverId, rr.riderId),
       peer_name: rr.rider?.name || 'Passenger',
       peer_avatar: rr.rider?.profilePic || null,
+      peer_rating: rr.rider?.rating ?? 5.0,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
       otp: rr.otp,
       actual_fare: rr.actualFare,
       rider_share: rr.riderShare,
       driver_share: rr.driverShare,
+      buddyRequestId: rr.buddyRequestId,
     };
   }
 }
