@@ -424,6 +424,185 @@ export class AuthController {
 
     return await this.formatUser(updatedUser);
   }
+  @Get('check-email')
+  @UseGuards(FirebaseAuthGuard)
+  async checkEmail(@Request() req: any, @Query('email') email: string) {
+    if (!email) {
+      throw new BadRequestException('Email is required');
+    }
+    const cleanEmail = email.trim().toLowerCase();
+
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        email: cleanEmail,
+        id: { not: req.user.id }
+      }
+    });
+
+    return { exists: !!existing };
+  }
+
+  @Post('email/send-otp')
+  @UseGuards(FirebaseAuthGuard)
+  async sendEmailOtp(@Request() req: any, @Body() body: { email: string }) {
+    const { email } = body;
+    if (!email) {
+      throw new BadRequestException('Email is required');
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Check if the email is already taken by another account
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        email: cleanEmail,
+        id: { not: req.user.id }
+      }
+    });
+    if (existing) {
+      throw new BadRequestException('This email is already registered with another account');
+    }
+
+    // Generate random 6-digit verification code
+    const code = this.smsService.generateOtpCode();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiration
+
+    console.log(`[EMAIL OTP] Generating verification code ${code} for email: ${cleanEmail}...`);
+
+    // Store OTP using the email as identifier (reusing VerificationCode table with email: prefix)
+    await this.prisma.verificationCode.create({
+      data: {
+        phoneNumber: `email:${cleanEmail}`,
+        code,
+        expiresAt,
+      },
+    });
+
+    // Send email via Resend API
+    const resendApiKey = process.env.RESEND_API_KEY;
+    const sender = process.env.RESEND_FROM_EMAIL || 'Aroundly Verification <support@aroundly.in>';
+    const subject = 'Aroundly Email Verification Code';
+
+    const htmlBody = `
+      <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #F8FBFB; padding: 40px 20px; text-align: center;">
+        <div style="max-width: 500px; margin: 0 auto; background: #FFFFFF; border: 1px solid #E2F0EF; border-radius: 16px; padding: 32px; box-shadow: 0 4px 12px rgba(10, 22, 40, 0.03);">
+          <h2 style="color: #0A1628; margin-top: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">Verify Your Email</h2>
+          <p style="color: #1A4060; font-size: 15px; line-height: 24px; margin-bottom: 24px;">
+            Use the 6-digit verification code below to verify your email address on Aroundly:
+          </p>
+          <div style="background-color: #E8FBF9; border-radius: 12px; padding: 16px; margin: 24px 0;">
+            <span style="font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #00B5A0;">${code}</span>
+          </div>
+          <p style="color: #6AA8C0; font-size: 13px; line-height: 20px;">
+            This code is valid for <strong>5 minutes</strong>. If you did not request this, you can safely ignore this email.
+          </p>
+          <hr style="border: 0; border-top: 1px solid #CCF7F3; margin: 32px 0 20px 0;" />
+          <p style="color: #1A4060; font-size: 12px;">Aroundly Carpooling · Keep Commuting Green</p>
+        </div>
+      </div>
+    `;
+
+    if (!resendApiKey) {
+      console.warn(`
+┌──────────────────────────────────────────────────────────┐
+│             [RESEND EMAIL DEV SANDBOX]                   │
+├──────────────────────────────────────────────────────────┤
+│ Email:    ${cleanEmail}
+│ OTP Code: ${code}
+│ Expiry:   5 Minutes                                      │
+├──────────────────────────────────────────────────────────┤
+│ To send real emails, configure RESEND_API_KEY in .env    │
+└──────────────────────────────────────────────────────────┘
+      `);
+    } else {
+      try {
+        console.log(`[RESEND] Sending email OTP to ${cleanEmail}...`);
+
+        const response = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: sender,
+            to: [cleanEmail],
+            subject: subject,
+            html: htmlBody,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          console.log(`[RESEND] Email OTP successfully dispatched. Message ID: ${data.id}`);
+        } else {
+          console.error(`[RESEND] API error (Status ${response.status}):`, data);
+          throw new Error('Failed to dispatch verification email');
+        }
+      } catch (err: any) {
+        console.error(`[RESEND] Failed to send email to ${cleanEmail}:`, err?.message || err);
+        throw new BadRequestException('Failed to send verification email. Please try again.');
+      }
+    }
+
+    return { success: true, message: 'Email verification code sent successfully' };
+  }
+
+  @Post('email/verify-otp')
+  @UseGuards(FirebaseAuthGuard)
+  async verifyEmailOtp(@Request() req: any, @Body() body: { email: string; code: string }) {
+    const { email, code } = body;
+    if (!email || !code) {
+      throw new BadRequestException('Email and verification code are required');
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanCode = code.trim();
+    const identifier = `email:${cleanEmail}`;
+
+    console.log(`[EMAIL OTP] Verifying code ${cleanCode} for email: ${cleanEmail}...`);
+
+    // Verify code exists, matches, and has not expired
+    const record = await this.prisma.verificationCode.findFirst({
+      where: {
+        phoneNumber: identifier,
+        code: cleanCode,
+        expiresAt: { gte: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!record) {
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    // Clean up code to prevent replay attacks
+    await this.prisma.verificationCode.deleteMany({
+      where: { phoneNumber: identifier },
+    });
+
+    // Check if email is already taken by another account (double-check)
+    const existing = await this.prisma.user.findFirst({
+      where: {
+        email: cleanEmail,
+        id: { not: req.user.id }
+      }
+    });
+    if (existing) {
+      throw new BadRequestException('This email is already registered with another account');
+    }
+
+    // Update the user's email
+    const updatedUser = await this.prisma.user.update({
+      where: { id: req.user.id },
+      data: { email: cleanEmail }
+    });
+
+    console.log(`[EMAIL OTP] Email successfully verified and updated to ${cleanEmail} for user ${req.user.id}`);
+
+    return await this.formatUser(updatedUser);
+  }
 
   @Patch('fcm-token')
   @UseGuards(FirebaseAuthGuard)

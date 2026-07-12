@@ -6,6 +6,7 @@ import { SearchMatchesDto } from './dto/search-matches.dto';
 import { pointWkt } from '../../common/utils/geo';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { ChatService } from '../chat/chat.service';
+import { generateDeterministicId } from '../../common/utils/id';
 
 import { MatchmakingGateway } from './matchmaking.gateway';
 
@@ -360,31 +361,152 @@ export class MatchmakingService {
       throw new BadRequestException('You already have a requested ride overlapping with this time window.');
     }
 
-    const id = randomUUID();
+    const id = generateDeterministicId('request', [riderId, dto.rideId]);
     const now = new Date();
 
-    const rows = await this.prisma.$queryRaw<
-      Array<{
-        id: string;
-        rideId: string;
-        riderId: string;
-        riderStartName: string;
-        riderEndName: string;
-        riderStartTime: Date;
-        status: RideStatus;
-      }>
+    // ── Compute rider's segment distance along the driver's route ──────────
+    // Project rider start/end onto the driver's routeLine and extract the
+    // sub-segment length. Fall back to straight-line if routeLine is absent.
+    const { calculateFare } = require('../../common/utils/pricing');
+    const segmentRows = await this.prisma.$queryRaw<
+      Array<{ segmentMeters: number; startDistMeters: number; endDistMeters: number; vehicleType: string; vehicleCapacity: number; fuelType: string }>
     >(Prisma.sql`
-      INSERT INTO "RideRequest"
-        ("id", "updatedAt", "rideId","riderId","riderStartName","riderEndName","riderStartTime","riderStart","riderEnd","status","seats")
-      VALUES
-        (${id}, ${now}, ${dto.rideId}, ${riderId}, ${dto.riderStartName}, ${dto.riderEndName}, ${riderStartTime},
-         ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
-         ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
-         ${RideStatus.REQUESTED}::"RideStatus",
-         ${seats}
-        )
-      RETURNING "id","rideId","riderId" as "riderName","riderStartName","riderEndName","riderStartTime","status","seats"
+      SELECT
+        CASE
+          WHEN r."routeLine" IS NOT NULL THEN
+            ST_Length(
+              ST_LineSubstring(
+                r."routeLine"::geography,
+                LEAST(
+                  ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
+                  ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
+                ),
+                GREATEST(
+                  ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
+                  ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
+                )
+              )
+            )
+          ELSE
+            ST_Distance(
+              ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography,
+              ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography
+            )
+        END AS "segmentMeters",
+        ST_Distance(r."routeLine"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography) AS "startDistMeters",
+        ST_Distance(r."routeLine"::geography, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)::geography) AS "endDistMeters",
+        r."vehicleType", r."vehicleCapacity", r."fuelType"
+      FROM "Ride" r
+      WHERE r."id" = ${dto.rideId}
     `);
+
+    const seg = segmentRows[0];
+    const segmentMeters = Number(seg?.segmentMeters || 0);
+    const deviationMeters = Number(seg?.startDistMeters || 0) + Number(seg?.endDistMeters || 0);
+    const fareBreakdown = calculateFare({
+      distanceMeters: segmentMeters,
+      deviationMeters,
+      startPlaceName: dto.riderStartName,
+      endPlaceName: dto.riderEndName,
+      vehicleType: seg?.vehicleType || 'CAR',
+      vehicleCapacity: seg?.vehicleCapacity || 5,
+      fuelType: seg?.fuelType || 'Petrol',
+    });
+    const fareCents = Math.round(fareBreakdown.finalFare * 100);
+    // ───────────────────────────────────────────────────────────────────────
+
+    // Auto-post a buddy request for the passenger (seeking ride) if they do not already have one
+    let targetBuddyRequestId: string | null = null;
+    const buddyReqId = generateDeterministicId('buddy', [riderId, dto.riderStartName, dto.riderEndName, riderStartTime.toISOString()]);
+
+    const existingBuddyRequest = await this.prisma.buddyRequest.findUnique({
+      where: { id: buddyReqId }
+    });
+
+    if (existingBuddyRequest) {
+      if (existingBuddyRequest.status === 'CANCELLED') {
+        await this.prisma.buddyRequest.update({
+          where: { id: buddyReqId },
+          data: { status: 'OPEN', seatsNeeded: seats }
+        });
+      }
+      targetBuddyRequestId = buddyReqId;
+    } else {
+      const myBuddyRequest = await this.prisma.buddyRequest.create({
+        data: {
+          id: buddyReqId,
+          riderId,
+          startPlaceName: dto.riderStartName,
+          endPlaceName: dto.riderEndName,
+          startTime: riderStartTime,
+          seatsNeeded: seats,
+          status: 'OPEN',
+          type: 'carpool'
+        }
+      });
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "BuddyRequest"
+        SET "startPoint" = ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
+            "endPoint" = ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)
+        WHERE id = ${myBuddyRequest.id}
+      `);
+      targetBuddyRequestId = myBuddyRequest.id;
+    }
+
+    const existingRequest = await this.prisma.rideRequest.findUnique({
+      where: { id }
+    });
+
+    let newRequest;
+    if (existingRequest) {
+      if (existingRequest.status === RideStatus.CANCELLED || existingRequest.status === RideStatus.REJECTED) {
+        await this.prisma.rideRequest.update({
+          where: { id },
+          data: {
+            status: RideStatus.REQUESTED,
+            seats,
+            fareCents,
+            buddyRequestId: targetBuddyRequestId,
+            updatedAt: now
+          }
+        });
+        const rows = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+          SELECT "id", "rideId", "riderId" as "riderName", "riderStartName", "riderEndName", "riderStartTime", "status", "seats", "fareCents"
+          FROM "RideRequest"
+          WHERE id = ${id}
+        `);
+        newRequest = rows[0];
+      } else {
+        throw new BadRequestException('You already have an active request for this ride.');
+      }
+    } else {
+      const rows = await this.prisma.$queryRaw<
+        Array<{
+          id: string;
+          rideId: string;
+          riderId: string;
+          riderStartName: string;
+          riderEndName: string;
+          riderStartTime: Date;
+          status: RideStatus;
+          fareCents: number;
+        }>
+      >(Prisma.sql`
+        INSERT INTO "RideRequest"
+          ("id", "updatedAt", "rideId","riderId","riderStartName","riderEndName","riderStartTime","riderStart","riderEnd","status","seats","fareCents","buddyRequestId")
+        VALUES
+          (${id}, ${now}, ${dto.rideId}, ${riderId}, ${dto.riderStartName}, ${dto.riderEndName}, ${riderStartTime},
+           ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
+           ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
+           ${RideStatus.REQUESTED}::"RideStatus",
+           ${seats},
+           ${fareCents},
+           ${targetBuddyRequestId}
+          )
+        RETURNING "id","rideId","riderId" as "riderName","riderStartName","riderEndName","riderStartTime","status","seats","fareCents"`,
+      );
+      newRequest = rows[0];
+    }
 
     // Mark ride requested (simple phase-1 state machine)
     await this.prisma.ride.update({
@@ -392,8 +514,6 @@ export class MatchmakingService {
       data: { status: RideStatus.REQUESTED },
       select: { id: true },
     });
-
-    const newRequest = rows[0];
 
     // Notify the driver in real-time
     this.gateway.notifyUser(ride.driverId, 'new_ride_request', newRequest);
@@ -521,36 +641,131 @@ export class MatchmakingService {
             throw new BadRequestException(`Not enough available seats. Only ${req.ride.seatsAvailable} remaining.`);
           }
           
-                    const newSeatsAvailable = req.ride.seatsAvailable - req.seats;
-          let rideStatus = req.ride.status;
-          if (req.ride.vehicleType === 'CAB') {
-            rideStatus = RideStatus.ACCEPTED;
-          } else if (newSeatsAvailable === 0) {
-            rideStatus = RideStatus.ACCEPTED;
-          } else {
-            const otherRequestedCount = await this.prisma.rideRequest.count({
-              where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
-            });
-            rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
-          }
-
+          const newSeatsAvailable = Math.max(0, req.ride.seatsAvailable - req.seats);
+          // Set Ride status to ACCEPTED (confirmed/booked)
           await this.prisma.ride.update({
             where: { id: req.rideId },
             data: {
               seatsAvailable: newSeatsAvailable,
-              status: rideStatus
+              status: RideStatus.ACCEPTED
             }
           });
         }
 
+        // Update passenger's buddyRequest to ACCEPTED
         if (req.buddyRequestId) {
           await this.prisma.buddyRequest.update({
             where: { id: req.buddyRequestId },
             data: { status: 'ACCEPTED' }
           }).catch(err => {
-            console.error('Failed to update associated buddy request:', req.buddyRequestId, err);
+            console.error('Failed to update passenger buddy request:', err);
           });
         }
+
+        // Update driver's buddyRequest to ACCEPTED (if any exists for this time window)
+        const driverBuddyRequest = await this.prisma.buddyRequest.findFirst({
+          where: {
+            riderId: req.ride.driverId,
+            status: 'OPEN',
+            startTime: {
+              gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+              lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+            }
+          }
+        });
+        if (driverBuddyRequest) {
+          await this.prisma.buddyRequest.update({
+            where: { id: driverBuddyRequest.id },
+            data: { status: 'ACCEPTED' }
+          }).catch(err => {
+            console.error('Failed to update driver buddy request:', err);
+          });
+        }
+
+        // Reject other requests for this ride
+        await this.prisma.rideRequest.updateMany({
+          where: {
+            rideId: req.rideId,
+            status: RideStatus.REQUESTED,
+            id: { not: req.id }
+          },
+          data: { status: RideStatus.REJECTED }
+        });
+
+        // Withdraw other pending requests for the rider
+        await this.prisma.rideRequest.updateMany({
+          where: {
+            riderId: req.riderId,
+            status: RideStatus.REQUESTED,
+            id: { not: req.id },
+            ride: {
+              startTime: {
+                gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+                lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+              }
+            }
+          },
+          data: { status: RideStatus.CANCELLED }
+        });
+
+        // Withdraw other open buddy requests for rider
+        await this.prisma.buddyRequest.updateMany({
+          where: {
+            riderId: req.riderId,
+            status: 'OPEN',
+            id: req.buddyRequestId ? { not: req.buddyRequestId } : undefined,
+            startTime: {
+              gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+              lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+            }
+          },
+          data: { status: 'CANCELLED' }
+        });
+
+        // Withdraw other pending requests for the driver (where driver is rider)
+        await this.prisma.rideRequest.updateMany({
+          where: {
+            riderId: req.ride.driverId,
+            status: RideStatus.REQUESTED,
+            ride: {
+              startTime: {
+                gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+                lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+              }
+            }
+          },
+          data: { status: RideStatus.CANCELLED }
+        });
+
+        // Cancel pending invitations sent by driver for other rides in this window
+        await this.prisma.rideRequest.updateMany({
+          where: {
+            ride: {
+              driverId: req.ride.driverId,
+              id: { not: req.rideId },
+              startTime: {
+                gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+                lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+              }
+            },
+            status: RideStatus.REQUESTED
+          },
+          data: { status: RideStatus.REJECTED }
+        });
+
+        // Cancel other open buddy requests for driver
+        await this.prisma.buddyRequest.updateMany({
+          where: {
+            riderId: req.ride.driverId,
+            status: 'OPEN',
+            id: driverBuddyRequest ? { not: driverBuddyRequest.id } : undefined,
+            startTime: {
+              gte: new Date(req.ride.startTime.getTime() - 2 * 60 * 60 * 1000),
+              lte: new Date(req.ride.startTime.getTime() + 2 * 60 * 60 * 1000),
+            }
+          },
+          data: { status: 'CANCELLED' }
+        });
       }
     } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED) {
       if (req.status === RideStatus.ACCEPTED) {
@@ -577,6 +792,22 @@ export class MatchmakingService {
           }).catch(err => {
             console.error('Failed to revert associated buddy request status:', req.buddyRequestId, err);
           });
+        }
+
+        // Revert driver's buddy request (if it exists) using deterministic ID lookup
+        const driverBuddyRequestId = generateDeterministicId('buddy', [
+          req.ride.driverId,
+          req.ride.startPlaceName,
+          req.ride.endPlaceName,
+          req.ride.startTime.toISOString()
+        ]);
+        try {
+          await this.prisma.buddyRequest.update({
+            where: { id: driverBuddyRequestId },
+            data: { status: 'OPEN' }
+          });
+        } catch (e) {
+          // Safe to ignore if it doesn't exist
         }
       }
     }
@@ -648,10 +879,44 @@ export class MatchmakingService {
     if (!req) throw new NotFoundException('Buddy request not found');
     if (req.riderId !== userId) throw new BadRequestException('Not authorized to update this request');
 
-    return this.prisma.buddyRequest.update({
+    const updated = await this.prisma.buddyRequest.update({
       where: { id },
       data: { status }
     });
+
+    if (status === 'CANCELLED') {
+      // Derive the corresponding CAB Ride ID deterministically
+      const cabRideId = generateDeterministicId('ride', [userId, req.startPlaceName, req.endPlaceName, req.startTime.toISOString()]);
+      try {
+        await this.prisma.ride.update({
+          where: { id: cabRideId },
+          data: { status: RideStatus.CANCELLED }
+        });
+
+        // Cancel all active requests for that CAB ride
+        await this.prisma.rideRequest.updateMany({
+          where: {
+            rideId: cabRideId,
+            status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
+          },
+          data: { status: RideStatus.CANCELLED }
+        });
+      } catch (e) {
+        // Safe to ignore if no cab ride exists for this buddy request
+      }
+
+      // Also cancel any pending RideRequest where this user is the rider
+      await this.prisma.rideRequest.updateMany({
+        where: {
+          riderId: userId,
+          status: RideStatus.REQUESTED,
+          buddyRequestId: id
+        },
+        data: { status: RideStatus.CANCELLED }
+      });
+    }
+
+    return updated;
   }
 
   async createBuddyRequest(body: any, riderId: string) {
@@ -664,8 +929,39 @@ export class MatchmakingService {
     const startWkt = startCoords && startCoords.length === 2 ? pointWkt({ lng: startCoords[0], lat: startCoords[1] }) : null;
     const endWkt = endCoords && endCoords.length === 2 ? pointWkt({ lng: endCoords[0], lat: endCoords[1] }) : null;
 
+    const id = generateDeterministicId('buddy', [riderId, startPlaceName, endPlaceName, departureTime.toISOString()]);
+
+    const existing = await this.prisma.buddyRequest.findUnique({
+      where: { id }
+    });
+
+    if (existing) {
+      if (existing.status === 'CANCELLED') {
+        const updated = await this.prisma.buddyRequest.update({
+          where: { id },
+          data: {
+            status: 'OPEN',
+            seatsNeeded: Number(seatsNeeded) || 1,
+            type: type || 'buddy'
+          }
+        });
+        if (startWkt && endWkt) {
+          await this.prisma.$executeRaw(Prisma.sql`
+            UPDATE "BuddyRequest"
+            SET "startPoint" = ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
+                "endPoint" = ST_SetSRID(ST_GeomFromText(${endWkt}), 4326)
+            WHERE id = ${id}
+          `);
+        }
+        return updated;
+      } else {
+        throw new BadRequestException('You already have an active request for this commute.');
+      }
+    }
+
     const buddyRequest = await this.prisma.buddyRequest.create({
       data: {
+        id,
         riderId,
         startPlaceName,
         endPlaceName,
@@ -688,7 +984,14 @@ export class MatchmakingService {
     return buddyRequest;
   }
 
-  async listBuddyRequests(userId: string, page?: number, limit?: number) {
+  async listBuddyRequests(
+    userId: string,
+    page?: number,
+    limit?: number,
+    latitude?: number,
+    longitude?: number,
+    radius: number = 3000,
+  ) {
     const involvedRequests = await this.prisma.rideRequest.findMany({
       where: {
         buddyRequestId: { not: null },
@@ -698,43 +1001,106 @@ export class MatchmakingService {
           { ride: { driverId: userId } }
         ]
       },
-      select: { buddyRequestId: true }
+      select: {
+        buddyRequestId: true,
+        riderId: true,
+        ride: {
+          select: {
+            driverId: true
+          }
+        }
+      }
     });
 
     const excludedBuddyRequestIds = involvedRequests
       .map(r => r.buddyRequestId)
       .filter((id): id is string => id !== null);
 
-    const prismaParams: any = {
-      where: {
-        riderId: { not: userId },
-        status: 'OPEN',
-        startTime: { gte: new Date() },
-        ...(excludedBuddyRequestIds.length > 0 ? { id: { notIn: excludedBuddyRequestIds } } : {})
-      },
-      include: {
-        rider: {
-          select: {
-            id: true,
-            name: true,
-            profilePic: true,
-            gender: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: 'desc'
+    const excludedRiderIds = [userId];
+    involvedRequests.forEach(r => {
+      if (r.riderId && r.riderId !== userId) {
+        excludedRiderIds.push(r.riderId);
       }
-    };
+      if (r.ride?.driverId && r.ride.driverId !== userId) {
+        excludedRiderIds.push(r.ride.driverId);
+      }
+    });
+    const uniqueExcludedRiderIds = Array.from(new Set(excludedRiderIds));
 
-    if (limit && limit > 0) {
-      prismaParams.take = limit;
-      if (page && page > 1) {
-        prismaParams.skip = (page - 1) * limit;
+    const offset = page && page > 1 && limit ? (page - 1) * limit : 0;
+    const take = limit && limit > 0 ? limit : 200;
+
+    const hasCoords = latitude !== undefined && longitude !== undefined;
+
+    let query: Prisma.Sql;
+    if (hasCoords) {
+      const startWkt = `POINT(${longitude} ${latitude})`;
+      const conditions: Prisma.Sql[] = [
+        Prisma.sql`br."riderId" NOT IN (${Prisma.join(uniqueExcludedRiderIds)})`,
+        Prisma.sql`br."status" = 'OPEN'`,
+        Prisma.sql`br."startTime" >= NOW()`,
+        Prisma.sql`br."type" = 'buddy'`,
+        Prisma.sql`ST_DWithin(br."startPoint"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`
+      ];
+      if (excludedBuddyRequestIds.length > 0) {
+        conditions.push(Prisma.sql`br."id" NOT IN (${Prisma.join(excludedBuddyRequestIds)})`);
       }
+      query = Prisma.sql`
+        SELECT
+          br."id", br."riderId", u."name" as "riderName", u."profilePic" as "riderAvatar", u."gender" as "riderGender", u."rating" as "riderRating",
+          br."seatsNeeded", br."startPlaceName", br."endPlaceName", br."startTime", br."status", br."type",
+          ST_AsGeoJSON(br."startPoint") AS "startPointGeoJson",
+          ST_AsGeoJSON(br."endPoint") AS "endPointGeoJson"
+        FROM "BuddyRequest" br
+        JOIN "User" u ON br."riderId" = u."id"
+        WHERE ${Prisma.join(conditions, ' AND ')}
+        ORDER BY br."createdAt" DESC
+        LIMIT ${take} OFFSET ${offset}
+      `;
+    } else {
+      const conditions: Prisma.Sql[] = [
+        Prisma.sql`br."riderId" NOT IN (${Prisma.join(uniqueExcludedRiderIds)})`,
+        Prisma.sql`br."status" = 'OPEN'`,
+        Prisma.sql`br."startTime" >= NOW()`,
+        Prisma.sql`br."type" = 'buddy'`
+      ];
+      if (excludedBuddyRequestIds.length > 0) {
+        conditions.push(Prisma.sql`br."id" NOT IN (${Prisma.join(excludedBuddyRequestIds)})`);
+      }
+      query = Prisma.sql`
+        SELECT
+          br."id", br."riderId", u."name" as "riderName", u."profilePic" as "riderAvatar", u."gender" as "riderGender", u."rating" as "riderRating",
+          br."seatsNeeded", br."startPlaceName", br."endPlaceName", br."startTime", br."status", br."type",
+          ST_AsGeoJSON(br."startPoint") AS "startPointGeoJson",
+          ST_AsGeoJSON(br."endPoint") AS "endPointGeoJson"
+        FROM "BuddyRequest" br
+        JOIN "User" u ON br."riderId" = u."id"
+        WHERE ${Prisma.join(conditions, ' AND ')}
+        ORDER BY br."createdAt" DESC
+        LIMIT ${take} OFFSET ${offset}
+      `;
     }
 
-    return this.prisma.buddyRequest.findMany(prismaParams);
+    const rows = await this.prisma.$queryRaw<any[]>(query);
+    return rows.map(r => ({
+      id: r.id,
+      riderId: r.riderId,
+      seatsNeeded: r.seatsNeeded,
+      startPlaceName: r.startPlaceName,
+      endPlaceName: r.endPlaceName,
+      startTime: r.startTime,
+      status: r.status,
+      type: r.type,
+      startPointGeoJson: r.startPointGeoJson,
+      endPointGeoJson: r.endPointGeoJson,
+      rider: {
+        id: r.riderId,
+        name: r.riderName,
+        profilePic: r.riderAvatar,
+        gender: r.riderGender,
+        rating: r.riderRating ?? 5.0
+      }
+    }));
   }
 
   async getBuddyRequest(id: string) {
@@ -802,6 +1168,58 @@ export class MatchmakingService {
 
     const requestId = randomUUID();
 
+    let calculatedFareCents = ride.chargeCents;
+
+    const segmentRows = await this.prisma.$queryRaw<
+      Array<{ segmentMeters: number; startDistMeters: number; endDistMeters: number; vehicleType: string; vehicleCapacity: number; fuelType: string }>
+    >(Prisma.sql`
+      SELECT
+        CASE
+          WHEN r."routeLine" IS NOT NULL THEN
+            ST_Length(
+              ST_LineSubstring(
+                r."routeLine"::geography,
+                LEAST(
+                  ST_LineLocatePoint(r."routeLine"::geometry, br."startPoint"),
+                  ST_LineLocatePoint(r."routeLine"::geometry, br."endPoint")
+                ),
+                GREATEST(
+                  ST_LineLocatePoint(r."routeLine"::geometry, br."startPoint"),
+                  ST_LineLocatePoint(r."routeLine"::geometry, br."endPoint")
+                )
+              )
+            )
+          ELSE
+            ST_Distance(
+              br."startPoint"::geography,
+              br."endPoint"::geography
+            )
+        END AS "segmentMeters",
+        ST_Distance(r."routeLine"::geography, br."startPoint"::geography) AS "startDistMeters",
+        ST_Distance(r."routeLine"::geography, br."endPoint"::geography) AS "endDistMeters",
+        r."vehicleType", r."vehicleCapacity", r."fuelType"
+      FROM "Ride" r
+      CROSS JOIN "BuddyRequest" br
+      WHERE r."id" = ${ride.id} AND br."id" = ${buddyRequestId}
+    `);
+
+    if (segmentRows && segmentRows.length > 0) {
+      const seg = segmentRows[0];
+      const segmentMeters = Number(seg.segmentMeters || 0);
+      const deviationMeters = Number(seg.startDistMeters || 0) + Number(seg.endDistMeters || 0);
+      const { calculateFare } = require('../../common/utils/pricing');
+      const fareBreakdown = calculateFare({
+        distanceMeters: segmentMeters,
+        deviationMeters,
+        startPlaceName: buddyRequest.startPlaceName,
+        endPlaceName: buddyRequest.endPlaceName,
+        vehicleType: seg.vehicleType || 'CAR',
+        vehicleCapacity: seg.vehicleCapacity || 5,
+        fuelType: seg.fuelType || 'Petrol',
+      });
+      calculatedFareCents = Math.round(fareBreakdown.finalFare * 100);
+    }
+
     const newRequest = await this.prisma.rideRequest.create({
       data: {
         id: requestId,
@@ -811,7 +1229,7 @@ export class MatchmakingService {
         riderEndName: buddyRequest.endPlaceName,
         riderStartTime: buddyRequest.startTime,
         status: RideStatus.REQUESTED,
-        fareCents: 1000,
+        fareCents: calculatedFareCents,
         seats: buddyRequest.seatsNeeded,
         isInvitation: true,
         buddyRequestId: buddyRequestId
@@ -910,45 +1328,92 @@ export class MatchmakingService {
     });
     if (existing) throw new BadRequestException('You have already sent a request to match with this buddy.');
 
-    const newRide = await this.prisma.ride.create({
-      data: {
-        id: randomUUID(),
-        driverId: requesterId,
-        seatsAvailable: 3,
-        chargeCents: 0,
-        startTime: buddyRequest.startTime,
-        endTime: new Date(buddyRequest.startTime.getTime() + 60 * 60 * 1000),
-        startPlaceName: buddyRequest.startPlaceName,
-        endPlaceName: buddyRequest.endPlaceName,
-        vehicleType: 'CAB',
-        vehicleCapacity: 4,
-        status: RideStatus.OPEN
-      }
+    const buddyReqId = generateDeterministicId('buddy', [requesterId, buddyRequest.startPlaceName, buddyRequest.endPlaceName, buddyRequest.startTime.toISOString()]);
+    const cabRideId = generateDeterministicId('ride', [requesterId, buddyRequest.startPlaceName, buddyRequest.endPlaceName, buddyRequest.startTime.toISOString()]);
+    const requestId = generateDeterministicId('request', [buddyRequest.riderId, cabRideId]);
+
+    // 1. Re-open / Create BuddyRequest
+    const existingBuddyRequest = await this.prisma.buddyRequest.findUnique({
+      where: { id: buddyReqId }
     });
+    if (existingBuddyRequest) {
+      if (existingBuddyRequest.status === 'CANCELLED') {
+        await this.prisma.buddyRequest.update({
+          where: { id: buddyReqId },
+          data: { status: 'OPEN', seatsNeeded: 1 }
+        });
+      }
+    } else {
+      const myBuddyRequest = await this.prisma.buddyRequest.create({
+        data: {
+          id: buddyReqId,
+          riderId: requesterId,
+          startPlaceName: buddyRequest.startPlaceName,
+          endPlaceName: buddyRequest.endPlaceName,
+          startTime: buddyRequest.startTime,
+          seatsNeeded: 1,
+          status: 'OPEN',
+          type: 'buddy'
+        }
+      });
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "BuddyRequest"
+        SET "startPoint" = (SELECT "startPoint" FROM "BuddyRequest" WHERE id = ${buddyRequestId}),
+            "endPoint" = (SELECT "endPoint" FROM "BuddyRequest" WHERE id = ${buddyRequestId})
+        WHERE id = ${myBuddyRequest.id}
+      `);
+    }
 
-    await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "Ride"
-      SET "startPoint" = br."startPoint",
-          "endPoint" = br."endPoint",
-          "routeLine" = ST_SetSRID(ST_MakeLine(br."startPoint", br."endPoint"), 4326)
-      FROM "BuddyRequest" br
-      WHERE "Ride".id = ${newRide.id} AND br.id = ${buddyRequestId}
-    `);
+    // 2. Re-open / Create CAB Ride
+    const existingCabRide = await this.prisma.ride.findUnique({
+      where: { id: cabRideId }
+    });
+    if (existingCabRide) {
+      if (
+        existingCabRide.status === RideStatus.CANCELLED ||
+        existingCabRide.status === RideStatus.COMPLETED ||
+        existingCabRide.status === RideStatus.REJECTED
+      ) {
+        await this.prisma.ride.update({
+          where: { id: cabRideId },
+          data: {
+            status: RideStatus.OPEN,
+            seatsAvailable: 3,
+            chargeCents: 0,
+            startTime: buddyRequest.startTime,
+            endTime: new Date(buddyRequest.startTime.getTime() + 60 * 60 * 1000)
+          }
+        });
+      }
+    } else {
+      const newRide = await this.prisma.ride.create({
+        data: {
+          id: cabRideId,
+          driverId: requesterId,
+          seatsAvailable: 3,
+          chargeCents: 0,
+          startTime: buddyRequest.startTime,
+          endTime: new Date(buddyRequest.startTime.getTime() + 60 * 60 * 1000),
+          startPlaceName: buddyRequest.startPlaceName,
+          endPlaceName: buddyRequest.endPlaceName,
+          vehicleType: 'CAB',
+          vehicleCapacity: 4,
+          status: RideStatus.OPEN
+        }
+      });
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "Ride"
+        SET "startPoint" = br."startPoint",
+            "endPoint" = br."endPoint",
+            "routeLine" = ST_SetSRID(ST_MakeLine(br."startPoint", br."endPoint"), 4326)
+        FROM "BuddyRequest" br
+        WHERE "Ride".id = ${newRide.id} AND br.id = ${buddyRequestId}
+      `);
+    }
 
-    const newRequest = await this.prisma.rideRequest.create({
-      data: {
-        id: randomUUID(),
-        rideId: newRide.id,
-        riderId: buddyRequest.riderId,
-        riderStartName: buddyRequest.startPlaceName,
-        riderEndName: buddyRequest.endPlaceName,
-        riderStartTime: buddyRequest.startTime,
-        status: RideStatus.REQUESTED,
-        seats: buddyRequest.seatsNeeded,
-        isInvitation: true,
-        fareCents: 0,
-        buddyRequestId: buddyRequestId
-      },
+    // 3. Re-open / Create RideRequest
+    const existingRequest = await this.prisma.rideRequest.findUnique({
+      where: { id: requestId },
       include: {
         rider: {
           select: { id: true, name: true, profilePic: true }
@@ -968,13 +1433,80 @@ export class MatchmakingService {
       }
     });
 
-    await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "RideRequest"
-      SET "riderStart" = br."startPoint",
-          "riderEnd" = br."endPoint"
-      FROM "BuddyRequest" br
-      WHERE "RideRequest".id = ${newRequest.id} AND br.id = ${buddyRequestId}
-    `);
+    let newRequest;
+    if (existingRequest) {
+      if (existingRequest.status === RideStatus.CANCELLED || existingRequest.status === RideStatus.REJECTED) {
+        newRequest = await this.prisma.rideRequest.update({
+          where: { id: requestId },
+          data: {
+            status: RideStatus.REQUESTED,
+            seats: buddyRequest.seatsNeeded,
+            fareCents: 0,
+            buddyRequestId: buddyRequestId,
+            updatedAt: new Date()
+          },
+          include: {
+            rider: {
+              select: { id: true, name: true, profilePic: true }
+            },
+            ride: {
+              select: {
+                id: true,
+                startPlaceName: true,
+                endPlaceName: true,
+                startTime: true,
+                vehicleType: true,
+                driver: {
+                  select: { id: true, name: true, profilePic: true }
+                }
+              }
+            }
+          }
+        });
+      } else {
+        newRequest = existingRequest;
+      }
+    } else {
+      newRequest = await this.prisma.rideRequest.create({
+        data: {
+          id: requestId,
+          rideId: cabRideId,
+          riderId: buddyRequest.riderId,
+          riderStartName: buddyRequest.startPlaceName,
+          riderEndName: buddyRequest.endPlaceName,
+          riderStartTime: buddyRequest.startTime,
+          status: RideStatus.REQUESTED,
+          seats: buddyRequest.seatsNeeded,
+          isInvitation: true,
+          fareCents: 0,
+          buddyRequestId: buddyRequestId
+        },
+        include: {
+          rider: {
+            select: { id: true, name: true, profilePic: true }
+          },
+          ride: {
+            select: {
+              id: true,
+              startPlaceName: true,
+              endPlaceName: true,
+              startTime: true,
+              vehicleType: true,
+              driver: {
+                select: { id: true, name: true, profilePic: true }
+              }
+            }
+          }
+        }
+      });
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "RideRequest"
+        SET "riderStart" = br."startPoint",
+            "riderEnd" = br."endPoint"
+        FROM "BuddyRequest" br
+        WHERE "RideRequest".id = ${newRequest.id} AND br.id = ${buddyRequestId}
+      `);
+    }
 
     try {
       this.gateway.notifyUser(buddyRequest.riderId, 'new_buddy_request', newRequest);
