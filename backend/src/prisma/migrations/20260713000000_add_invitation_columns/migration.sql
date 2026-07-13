@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "RideRequest" 
+ADD COLUMN IF NOT EXISTS "isInvitation" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN IF NOT EXISTS "buddyRequestId" TEXT;
