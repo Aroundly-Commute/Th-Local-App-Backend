@@ -189,25 +189,32 @@ export class RidesService {
       conditions.push(Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`);
     }
 
-    // Only show carpool rides (CAR) in Rides Near You. CAB rides are handled via cab share matchmaking.
+    // Only show carpool rides (CAR) offered by others in Rides Near You.
     conditions.push(Prisma.sql`r."vehicleType" = 'CAR'`);
+    conditions.push(Prisma.sql`r."role" = 'OFFERED'`);
 
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
     
     if (excludeDriverId) {
       conditions.push(Prisma.sql`r."driverId" != ${excludeDriverId}`);
+      // Exclude rides for which THIS specific user has a pending or accepted request (sent OR received)
       conditions.push(Prisma.sql`NOT EXISTS (
         SELECT 1 FROM "RideRequest" rr
-        WHERE rr."rideId" = r."id"
-          AND rr."riderId" = ${excludeDriverId}
-          AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+        JOIN "Ride" tr ON rr."rideId" = tr."id"
+        LEFT JOIN "Ride" req_r ON rr."requesterRideId" = req_r."id"
+        WHERE rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
+          AND (
+            ( (rr."rideId" = r."id" OR rr."requesterRideId" = r."id") AND (rr."riderId" = ${excludeDriverId} OR tr."driverId" = ${excludeDriverId} OR req_r."driverId" = ${excludeDriverId}) )
+            OR
+            ( (tr."driverId" = ${excludeDriverId} OR req_r."driverId" = ${excludeDriverId}) AND (rr."riderId" = r."driverId" OR tr."driverId" = r."driverId" OR req_r."driverId" = r."driverId") )
+          )
       )`);
     }
 
     // Vacancy check: Exclude rides that have any accepted ride requests
     conditions.push(Prisma.sql`NOT EXISTS (
       SELECT 1 FROM "RideRequest" rr
-      WHERE rr."rideId" = r."id"
+      WHERE (rr."rideId" = r."id" OR rr."requesterRideId" = r."id")
         AND rr."status" = 'ACCEPTED'::"RideStatus"
     )`);
     
@@ -458,12 +465,27 @@ export class RidesService {
       fuelType: ride.fuelType || 'Petrol'
     });
 
+    const { getUserStaticOtp } = require('../matchmaking/matchmaking.service');
+    const my_otp = userId ? getUserStaticOtp(userId) : null;
+    let peerUserId: string | null = null;
+    if (userId) {
+      if (userId === ride.driverId) {
+        const firstPass = (ride as any).passengers?.[0];
+        peerUserId = firstPass ? firstPass.rider_id : null;
+      } else {
+        peerUserId = ride.driverId;
+      }
+    }
+    const peer_otp = peerUserId ? getUserStaticOtp(peerUserId) : null;
+
     return {
       ...ride,
       distance_km,
       co2_saved_kg,
       my_review_rating,
       estimatedFare,
+      my_otp,
+      peer_otp,
     };
   }
 
@@ -498,26 +520,40 @@ export class RidesService {
       }
 
       const activeRequests = await this.prisma.rideRequest.findMany({
-        where: { rideId: id, status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] } }
+        where: {
+          OR: [
+            { rideId: id },
+            { requesterRideId: id }
+          ],
+          status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
+        },
+        include: { ride: true }
       });
 
       if (activeRequests.length > 0) {
         await this.prisma.rideRequest.updateMany({
-          where: { rideId: id, status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] } },
+          where: {
+            OR: [
+              { rideId: id },
+              { requesterRideId: id }
+            ],
+            status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
+          },
           data: { status: RideStatus.CANCELLED }
         });
 
         for (const req of activeRequests) {
           try {
+            const targetUser = req.riderId === ride.driverId ? (req.ride?.driverId || req.riderId) : req.riderId;
             await this.chatService.sendNotificationToUser(
-              req.riderId,
-              'Ride Cancelled by Driver',
-              'The driver has cancelled the offered ride.',
+              targetUser,
+              'Ride Cancelled',
+              'The ride has been cancelled.',
               'ride_cancelled',
               { rideId: id, requestId: req.id }
             );
           } catch (e) {
-            console.error('Failed to send cancellation notification to rider:', req.riderId, e);
+            console.error('Failed to send cancellation notification:', e);
           }
         }
       }
@@ -531,7 +567,20 @@ export class RidesService {
       where: { driverId: userId },
       include: {
         driver: true,
-        requests: { include: { rider: true } }
+        requests: {
+          include: {
+            rider: true,
+            ride: { include: { driver: true } },
+            requesterRide: { include: { driver: true } }
+          }
+        },
+        requestsSent: {
+          include: {
+            rider: true,
+            ride: { include: { driver: true } },
+            requesterRide: { include: { driver: true } }
+          }
+        }
       }
     });
 
@@ -601,7 +650,8 @@ export class RidesService {
     }
 
     for (const r of driverRides) {
-      for (const rr of r.requests) {
+      const allReqs = [...(r.requests || []), ...(r.requestsSent || [])];
+      for (const rr of allReqs) {
         if ((rr.status === 'ACCEPTED' || rr.status === 'STARTED') && !rr.otp) {
           const randomOtp = Math.floor(1000 + Math.random() * 9000).toString();
           rr.otp = randomOtp;
@@ -617,6 +667,7 @@ export class RidesService {
     const past: any[] = [];
     const requested: any[] = [];
 
+    // Populate upcoming and past strictly from the unified Ride table (where driverId = userId)
     driverRides.forEach(r => {
       const mapped = this.mapDriverRide(r, userId, reviewMap);
       if (r.status === 'CANCELLED' || r.startTime < new Date()) {
@@ -624,10 +675,10 @@ export class RidesService {
       } else {
         upcoming.push(mapped);
 
-        // Find sent invitations in driverRides
+        // Populate pending invitations for Requests tab
         r.requests.forEach(rr => {
           if (rr.status === 'REQUESTED' && rr.isInvitation === true) {
-            (rr as any).ride = r; // Crucial fix: attach parent ride reference to avoid mapping crashes
+            (rr as any).ride = r;
             const mappedInvitation = this.mapReceivedRequest(rr, reviewMap);
             requested.push({
               ...mappedInvitation,
@@ -642,40 +693,24 @@ export class RidesService {
       }
     });
 
+    // Populate pending outgoing and incoming requests for Requests tab
     riderRequests.forEach(rr => {
       const mapped = this.mapRiderRequest(rr, reviewMap);
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
-      if (rr.status === 'ACCEPTED' || rr.status === 'STARTED') {
-        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
-          upcoming.push(mapped);
+      if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+        if (rr.isInvitation === false) {
+          requested.push({
+            ...mapped,
+            section: 'sent',
+            requestType: 'sent_ride_join'
+          });
         } else {
-          past.push(mapped);
+          requested.push({
+            ...mapped,
+            section: 'received',
+            requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
+          });
         }
-      } else if (rr.status === 'REQUESTED') {
-        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
-          // Push to upcoming so it shows in own upcoming tab as "Requested"
-          if (rr.isInvitation === false) {
-            upcoming.push(mapped);
-          }
-
-          if (rr.isInvitation === false) {
-            requested.push({
-              ...mapped,
-              section: 'sent',
-              requestType: 'sent_ride_join'
-            });
-          } else {
-            requested.push({
-              ...mapped,
-              section: 'received',
-              requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
-            });
-          }
-        } else {
-          past.push(mapped);
-        }
-      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED' || rr.status === 'COMPLETED') {
-        past.push(mapped);
       }
     });
 
@@ -686,107 +721,33 @@ export class RidesService {
         : this.mapRiderRequest(rr, reviewMap);
 
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
-      if (rr.status === 'REQUESTED') {
-        if (rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
-          if (rr.isInvitation === false) {
-            if (!requested.some(item => item.request_id === rr.id)) {
-              requested.push({
-                ...mapped,
-                section: 'received',
-                requestType: 'received_ride_join'
-              });
-            }
-          } else {
-            if (!requested.some(item => item.request_id === rr.id)) {
-              requested.push({
-                ...mapped,
-                section: 'received',
-                requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
-              });
-            }
-          }
-        } else {
-          if (!past.some(item => item.request_id === rr.id)) {
-            past.push(mapped);
-          }
-        }
-      } else if (rr.status === 'REJECTED' || rr.status === 'CANCELLED') {
-        if (!past.some(item => item.request_id === rr.id)) {
-          past.push(mapped);
+      if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+        if (!requested.some(item => item.request_id === rr.id)) {
+          requested.push({
+            ...mapped,
+            section: 'received',
+            requestType: rr.ride.vehicleType === 'CAB' ? 'received_cab_share' : 'received_ride_join'
+          });
         }
       }
     });
 
-    buddyRequests.forEach(br => {
-      if (br.status === 'ACCEPTED') {
-        return;
-      }
-
-      // Skip displaying buddy request if the user has an associated CAB ride in this window
-      const hasAssociatedCabRide = driverRides.some(dr =>
-        dr.vehicleType === 'CAB' &&
-        Math.abs(dr.startTime.getTime() - br.startTime.getTime()) < 2 * 60 * 60 * 1000
-      );
-      if (hasAssociatedCabRide) {
-        return;
-      }
-
-      // Skip displaying buddy request if the user has an active/pending ride request associated with it
-      const hasAssociatedRiderRequest = riderRequests.some(rr =>
-        rr.buddyRequestId === br.id &&
-        rr.status !== 'CANCELLED' &&
-        rr.status !== 'REJECTED'
-      );
-      if (hasAssociatedRiderRequest) {
-        return;
-      }
-
-      if (br.status === 'OPEN') {
-        const isDriverOfActiveCab = driverRides.some(dr =>
-          dr.vehicleType === 'CAB' && dr.status !== 'CANCELLED' && dr.status !== 'COMPLETED'
-        );
-        if (isDriverOfActiveCab) {
-          return;
-        }
-      }
-
-      const mapped = {
-        id: br.id,
-        isBuddyRequest: true,
-        role: 'rider',
-        request_status: br.status,
-        driver_id: br.riderId,
-        driver_name: br.rider?.name || 'Buddy Request',
-        driver_avatar: br.rider?.profilePic || null,
-        driver_rating: 5.0,
-        origin: br.startPlaceName,
-        destination: br.endPlaceName,
-        departure_time: br.startTime.toISOString(),
-        seats_available: br.seatsNeeded,
-        price_per_seat: 0,
-        status: br.status,
-        chat_id: null,
-        peer_name: 'Buddy',
-      };
-
-      if (br.status === 'CANCELLED' || br.startTime < new Date()) {
-        past.push(mapped);
-      } else if (br.status === 'OPEN') {
-        // Push open buddy requests ONLY to upcoming tab, NOT to requests tab
-        upcoming.push(mapped);
-      } else {
-        upcoming.push(mapped);
-      }
+    // Deduplicate arrays by ride ID
+    const seenUpcomingIds = new Set<string>();
+    const uniqueUpcoming = upcoming.filter(item => {
+      if (seenUpcomingIds.has(item.id)) return false;
+      seenUpcomingIds.add(item.id);
+      return true;
     });
 
-    upcoming.sort((a, b) => new Date(a.departure_time).getTime() - new Date(b.departure_time).getTime());
+    uniqueUpcoming.sort((a, b) => new Date(a.departure_time).getTime() - new Date(b.departure_time).getTime());
     past.sort((a, b) => new Date(b.departure_time).getTime() - new Date(a.departure_time).getTime());
 
-    const totalUpcoming = upcoming.length;
+    const totalUpcoming = uniqueUpcoming.length;
     const totalPast = past.length;
     const totalRequested = requested.length;
 
-    let paginatedUpcoming = upcoming;
+    let paginatedUpcoming = uniqueUpcoming;
     let paginatedPast = past;
     let paginatedRequested = requested;
 
@@ -809,6 +770,82 @@ export class RidesService {
       totalUpcomingCount: totalUpcoming,
       totalPastCount: totalPast,
       totalRequestedCount: totalRequested,
+    };
+  }
+
+  private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
+    const isSeeking = r.role === 'SEEKING';
+    const allRequests = [
+      ...(r.requests || []),
+      ...(r.requestsSent || [])
+    ];
+    const acceptedRequests = allRequests.filter((rr: any) =>
+      rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED'
+    );
+    const isConfirmed = acceptedRequests.length > 0;
+    const acceptedReq = acceptedRequests[0];
+
+    let peerUser: any = null;
+    if (isConfirmed && acceptedReq) {
+      if (acceptedReq.riderId && acceptedReq.riderId !== userId) {
+        peerUser = acceptedReq.rider;
+      } else if (acceptedReq.ride && acceptedReq.ride.driverId !== userId) {
+        peerUser = acceptedReq.ride.driver;
+      } else if (acceptedReq.requesterRide && acceptedReq.requesterRide.driverId !== userId) {
+        peerUser = acceptedReq.requesterRide.driver;
+      }
+    }
+
+    const chat_id = isConfirmed && peerUser ? getDeterministicChatId(userId, peerUser.id) : null;
+    const peer_id = isConfirmed && peerUser ? peerUser.id : null;
+    const peer_name = isConfirmed && peerUser ? peerUser.name : null;
+    const peer_avatar = isConfirmed && peerUser ? peerUser.profilePic : null;
+    const peer_rating = isConfirmed && peerUser ? (peerUser.rating ?? 5.0) : null;
+
+    const isCab = r.vehicleType === 'CAB';
+    const rawPrice = isConfirmed && acceptedReq ? (acceptedReq.fareCents ? acceptedReq.fareCents / 100 : r.chargeCents / 100) : r.chargeCents / 100;
+    const price_per_seat = (isSeeking || isCab) ? null : rawPrice;
+
+    return {
+      id: r.id,
+      role: isSeeking ? 'rider' : 'driver',
+      ride_role: isSeeking ? 'SEEKING' : 'OFFERED',
+      isConfirmed,
+      driver_id: r.driverId,
+      driver_name: isConfirmed || r.driverId === userId ? (r.driver?.name || 'Driver') : null,
+      driver_avatar: isConfirmed || r.driverId === userId ? (r.driver?.profilePic || null) : null,
+      driver_gender: isConfirmed || r.driverId === userId ? (r.driver?.gender || null) : null,
+      driver_rating: isConfirmed || r.driverId === userId ? (r.driver?.rating ?? 5.0) : null,
+      origin: r.startPlaceName,
+      destination: r.endPlaceName,
+      departure_time: r.startTime.toISOString(),
+      seats_available: r.seatsAvailable,
+      price_per_seat,
+      status: r.status,
+      vehicle_type: r.vehicleType,
+      passengers: isConfirmed ? acceptedRequests.map((rr: any) => {
+        const passengerUser = (rr.riderId !== userId ? rr.rider : null) || (rr.ride?.driverId !== userId ? rr.ride?.driver : null) || (rr.requesterRide?.driverId !== userId ? rr.requesterRide?.driver : null);
+        return {
+          request_id: rr.id,
+          rider_id: passengerUser?.id || rr.riderId,
+          rider_name: passengerUser?.name || 'Passenger',
+          rider_avatar: passengerUser?.profilePic || null,
+          rider_rating: passengerUser?.rating ?? 5.0,
+          status: rr.status,
+          chat_id: getDeterministicChatId(userId, passengerUser?.id || rr.riderId),
+          seats: rr.seats,
+          my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${passengerUser?.id || rr.riderId}`) || null) : null,
+          otp: rr.otp,
+          actual_fare: rr.actualFare,
+          rider_share: rr.riderShare,
+          driver_share: rr.driverShare,
+        };
+      }) : [],
+      chat_id,
+      peer_id,
+      peer_name,
+      peer_avatar,
+      peer_rating,
     };
   }
 
@@ -880,7 +917,7 @@ export class RidesService {
           }
         });
       } else {
-        throw new BadRequestException('You already have an active ride with these details.');
+        return existingRide;
       }
     } else {
       ride = await this.prisma.ride.create({
@@ -1011,14 +1048,61 @@ export class RidesService {
     const exists = ride.requests.find(r => r.riderId === userId && r.status !== 'CANCELLED');
     if (exists) return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
 
+    const riderStartTime = body.riderStartTime ? new Date(body.riderStartTime) : ride.startTime;
+    const startName = body.riderStartName || ride.startPlaceName;
+    const endName = body.riderEndName || ride.endPlaceName;
+
+    // Auto-post / ensure a seeking Ride entry for the passenger in the Ride table
+    let existingRiderRide = await this.prisma.ride.findFirst({
+      where: {
+        driverId: userId,
+        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        startTime: {
+          gte: new Date(riderStartTime.getTime() - 5 * 60 * 1000),
+          lte: new Date(riderStartTime.getTime() + 5 * 60 * 1000),
+        }
+      }
+    });
+
+    let riderRideId: string;
+    if (existingRiderRide) {
+      riderRideId = existingRiderRide.id;
+    } else {
+      riderRideId = generateDeterministicId('ride', [userId, startName, endName, riderStartTime.toISOString()]);
+      await this.prisma.ride.create({
+        data: {
+          id: riderRideId,
+          driverId: userId,
+          role: 'SEEKING',
+          seatsAvailable: 1,
+          chargeCents: calculatedFareCents,
+          startTime: riderStartTime,
+          endTime: new Date(riderStartTime.getTime() + 60 * 60 * 1000),
+          startPlaceName: startName,
+          endPlaceName: endName,
+          status: RideStatus.OPEN,
+          vehicleType: ride.vehicleType || 'CAR',
+        }
+      });
+      if (body.riderStartCoords && body.riderEndCoords) {
+        await this.prisma.$executeRaw(Prisma.sql`
+          UPDATE "Ride"
+          SET "startPoint" = ST_SetSRID(ST_MakePoint(${body.riderStartCoords[0]}, ${body.riderStartCoords[1]}), 4326),
+              "endPoint" = ST_SetSRID(ST_MakePoint(${body.riderEndCoords[0]}, ${body.riderEndCoords[1]}), 4326)
+          WHERE id = ${riderRideId}
+        `);
+      }
+    }
+
     const requestId = await this.prisma.rideRequest.create({
       data: {
         id: randomUUID(),
         rideId: ride.id,
+        requesterRideId: riderRideId,
         riderId: userId,
-        riderStartName: body.riderStartName || ride.startPlaceName,
-        riderEndName: body.riderEndName || ride.endPlaceName,
-        riderStartTime: body.riderStartTime ? new Date(body.riderStartTime) : ride.startTime,
+        riderStartName: startName,
+        riderEndName: endName,
+        riderStartTime: riderStartTime,
         status: RideStatus.REQUESTED,
         fareCents: calculatedFareCents
       },
@@ -1058,82 +1142,48 @@ export class RidesService {
     return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
   }
 
-  private mapDriverRide(r: any, userId: string, reviewMap?: Map<string, number>) {
-    const acceptedPassengers = (r.requests || []).filter((rr: any) =>
-      rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED'
-    );
-    const isConfirmed = acceptedPassengers.length > 0;
-    const firstPassenger = acceptedPassengers[0];
-
-    const chat_id = firstPassenger ? getDeterministicChatId(r.driverId, firstPassenger.riderId) : null;
-    const peer_name = isConfirmed && firstPassenger ? firstPassenger.rider?.name : null;
-    const peer_avatar = isConfirmed && firstPassenger ? firstPassenger.rider?.profilePic : null;
-    const peer_rating = isConfirmed && firstPassenger ? (firstPassenger.rider?.rating ?? 5.0) : null;
-
-    return {
-      id: r.id,
-      role: 'driver',
-      isConfirmed,
-      driver_id: r.driverId,
-      driver_name: r.driver?.name || 'Driver',
-      driver_avatar: r.driver?.profilePic || null,
-      driver_gender: r.driver?.gender || null,
-      driver_rating: r.driver?.rating ?? 5.0,
-      origin: r.startPlaceName,
-      destination: r.endPlaceName,
-      departure_time: r.startTime.toISOString(),
-      seats_available: r.seatsAvailable,
-      price_per_seat: isConfirmed && firstPassenger ? (firstPassenger.fareCents ? firstPassenger.fareCents / 100 : r.chargeCents / 100) : r.chargeCents / 100,
-      status: r.status,
-      vehicle_type: r.vehicleType,
-      passengers: acceptedPassengers.map((rr: any) => ({
-        request_id: rr.id,
-        rider_id: rr.riderId,
-        rider_name: rr.rider?.name || 'Passenger',
-        rider_avatar: rr.rider?.profilePic || null,
-        rider_rating: rr.rider?.rating ?? 5.0,
-        status: rr.status,
-        chat_id: getDeterministicChatId(r.driverId, rr.riderId),
-        seats: rr.seats,
-        my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
-        otp: rr.otp,
-        actual_fare: rr.actualFare,
-        rider_share: rr.riderShare,
-        driver_share: rr.driverShare,
-      })),
-      chat_id,
-      peer_name,
-      peer_avatar,
-      peer_rating,
-    };
-  }
-
   private mapRiderRequest(rr: any, reviewMap?: Map<string, number>) {
     const r = rr.ride;
     const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
+    const isSeekingMatch = r.role === 'SEEKING' || r.vehicleType === 'CAB';
+
+    // Target user (host driver) details for sent requests in Requests tab
+    const driver_name = r.driver?.name || 'Driver';
+    const driver_avatar = r.driver?.profilePic || null;
+    const driver_rating = r.driver?.rating ?? 5.0;
+    const peer_id = r.driverId;
+    const peer_name = driver_name;
+    const peer_avatar = driver_avatar;
+    const peer_rating = driver_rating;
+
+    // Price protection: Cab share & seeking matches have NO price info
+    const rawPrice = rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100;
+    const price_per_seat = isSeekingMatch ? null : rawPrice;
 
     return {
       id: r.id,
       request_id: rr.id,
       role: 'rider',
+      ride_role: r.role || 'OFFERED',
       isConfirmed,
       request_status: rr.status,
       driver_id: r.driverId,
-      driver_name: r.driver?.name || 'Driver',
-      driver_avatar: r.driver?.profilePic || null,
-      driver_gender: r.driver?.gender || null,
-      driver_rating: r.driver?.rating ?? 5.0,
+      driver_name,
+      driver_avatar,
+      driver_gender: isConfirmed ? (r.driver?.gender || null) : null,
+      driver_rating,
       origin: rr.riderStartName || r.startPlaceName,
       destination: rr.riderEndName || r.endPlaceName,
       departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
       seats_available: r.seatsAvailable,
-      price_per_seat: rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100,
+      price_per_seat,
       status: r.status,
       vehicle_type: r.vehicleType,
       chat_id: getDeterministicChatId(r.driverId, rr.riderId),
-      peer_name: r.driver?.name || 'Driver',
-      peer_avatar: r.driver?.profilePic || null,
-      peer_rating: r.driver?.rating ?? 5.0,
+      peer_id,
+      peer_name,
+      peer_avatar,
+      peer_rating,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
       otp: rr.otp,
@@ -1147,30 +1197,43 @@ export class RidesService {
   private mapReceivedRequest(rr: any, reviewMap?: Map<string, number>) {
     const r = rr.ride;
     const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
+    const isSeekingMatch = r.role === 'SEEKING' || r.vehicleType === 'CAB';
+
+    // Requester/Peer details shown in Requests tab so user knows who requested
+    const peer_id = rr.riderId;
+    const peer_name = rr.rider?.name || 'Passenger';
+    const peer_avatar = rr.rider?.profilePic || null;
+    const peer_rating = rr.rider?.rating ?? 5.0;
+
+    // Price protection: Seeking matches & Cab share have NO price info
+    const rawPrice = rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100;
+    const price_per_seat = isSeekingMatch ? null : rawPrice;
 
     return {
       id: r.id,
       request_id: rr.id,
       role: 'driver',
+      ride_role: r.role || 'OFFERED',
       isConfirmed,
       rider_id: rr.riderId,
       request_status: rr.status,
       driver_id: r.driverId,
-      driver_name: r.driver?.name || 'Driver',
-      driver_avatar: r.driver?.profilePic || null,
-      driver_gender: r.driver?.gender || null,
-      driver_rating: r.driver?.rating ?? 5.0,
+      driver_name: isConfirmed ? (r.driver?.name || 'Driver') : null,
+      driver_avatar: isConfirmed ? (r.driver?.profilePic || null) : null,
+      driver_gender: isConfirmed ? (r.driver?.gender || null) : null,
+      driver_rating: isConfirmed ? (r.driver?.rating ?? 5.0) : null,
       origin: rr.riderStartName || r.startPlaceName,
       destination: rr.riderEndName || r.endPlaceName,
       departure_time: rr.riderStartTime?.toISOString() || r.startTime.toISOString(),
       seats_available: r.seatsAvailable,
-      price_per_seat: rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100,
+      price_per_seat,
       status: r.status,
       vehicle_type: r.vehicleType,
       chat_id: getDeterministicChatId(r.driverId, rr.riderId),
-      peer_name: rr.rider?.name || 'Passenger',
-      peer_avatar: rr.rider?.profilePic || null,
-      peer_rating: rr.rider?.rating ?? 5.0,
+      peer_id,
+      peer_name,
+      peer_avatar,
+      peer_rating,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
       otp: rr.otp,
