@@ -14,6 +14,7 @@ enum RideStatus {
   ACCEPTED
   REJECTED
   CANCELLED
+  WITHDRAWN
   STARTED
   COMPLETED
 }
@@ -25,6 +26,7 @@ model Ride {
 
   driverId          String
   driver            User       @relation("DriverRides", fields: [driverId], references: [id])
+  role              String     @default("OFFERED") // "OFFERED" | "SEEKING"
   seatsAvailable    Int        @default(1)
   chargeCents       Int
 
@@ -48,44 +50,52 @@ model Ride {
   fuelType          String     @default("Petrol")
   vehicleNumber     String     @default("")
 
-  requests          RideRequest[]
+  requests          RideRequest[] @relation("TargetRide")
+  requestsSent      RideRequest[] @relation("RequesterRide")
 
   @@index([startTime])
   @@index([endTime])
+  @@index([driverId])
+  @@index([status])
 }
 
 model RideRequest {
-  id             String   @id @default(uuid())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                String     @id @default(uuid())
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
-  rideId         String
-  ride           Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  rideId            String
+  ride              Ride       @relation("TargetRide", fields: [rideId], references: [id], onDelete: Cascade)
 
-  riderId        String
-  rider          User     @relation("RiderRequests", fields: [riderId], references: [id])
-  riderStartName String
-  riderEndName   String
-  riderStartTime DateTime
+  requesterRideId   String?
+  requesterRide     Ride?      @relation("RequesterRide", fields: [requesterRideId], references: [id], onDelete: SetNull)
 
-  riderStart     Unsupported("geometry(Point,4326)")?
-  riderEnd       Unsupported("geometry(Point,4326)")?
+  riderId           String
+  rider             User       @relation("RiderRequests", fields: [riderId], references: [id])
+  riderStartName    String
+  riderEndName      String
+  riderStartTime    DateTime
 
-  status         RideStatus @default(REQUESTED)
-  fareCents      Int        @default(1000)
-  seats          Int        @default(1)
+  riderStart        Unsupported("geometry(Point,4326)")?
+  riderEnd          Unsupported("geometry(Point,4326)")?
 
-  isInvitation   Boolean    @default(false)
-  buddyRequestId String?
+  status            RideStatus @default(REQUESTED)
+  fareCents         Int        @default(1000)
+  seats             Int        @default(1)
 
-  otp            String?
-  actualFare     Float?
-  riderShare     Float?
-  driverShare    Float?
-  startedAt      DateTime?
-  completedAt    DateTime?
+  isInvitation      Boolean    @default(false)
+  buddyRequestId    String?
+
+  otp               String?
+  actualFare        Float?
+  riderShare        Float?
+  driverShare       Float?
+  startedAt         DateTime?
+  completedAt       DateTime?
 
   @@index([rideId])
+  @@index([requesterRideId])
+  @@index([riderId])
 }
 
 model User {
