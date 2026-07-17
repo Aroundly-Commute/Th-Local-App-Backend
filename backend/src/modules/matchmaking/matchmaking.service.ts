@@ -522,16 +522,29 @@ export class MatchmakingService {
     });
 
     // Notify the driver in real-time
-    this.gateway.notifyUser(ride.driverId, 'new_ride_request', newRequest);
+    const riderUser = await this.prisma.user.findUnique({
+      where: { id: riderId },
+      select: { id: true, name: true, profilePic: true, rating: true }
+    });
+
+    const richNotificationPayload = {
+      ...newRequest,
+      riderName: riderUser?.name || 'Rider',
+      fareAmount: Math.round((newRequest.fareCents || 1000) / 100),
+      peerRole: 'SEEKER',
+      peerUser: riderUser
+    };
+
+    this.gateway.notifyUser(ride.driverId, 'new_ride_request', richNotificationPayload);
     await this.chatService.sendNotificationToUser(
       ride.driverId,
       'New Ride Request',
-      'You have received a new ride request.',
+      `${riderUser?.name || 'A rider'} requested to join your ride. Earnings: ₹${richNotificationPayload.fareAmount}`,
       'new_ride_request',
-      newRequest
+      richNotificationPayload
     );
 
-    return newRequest;
+    return richNotificationPayload;
   }
 
   async listRequests(rideId?: string, riderId?: string) {
@@ -858,44 +871,58 @@ export class MatchmakingService {
     }
 
     try {
+      const actorUser = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, name: true, profilePic: true, rating: true }
+      });
+
+      const richUpdatedReq = {
+        ...updatedReq,
+        fareCents: req.fareCents,
+        fareAmount: Math.round((req.fareCents || 1000) / 100),
+        riderStartName: req.riderStartName,
+        riderEndName: req.riderEndName,
+        peerUser: actorUser
+      };
+
       if (req.isInvitation) {
         if (status === RideStatus.CANCELLED) {
-          this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+          this.gateway.notifyUser(req.riderId, 'ride_request_updated', richUpdatedReq);
           await this.chatService.sendNotificationToUser(
             req.riderId,
             buddyRequest ? 'Cab Partner Request Cancelled' : 'Ride Invite Withdrawn',
-            buddyRequest ? 'A user has cancelled their request to book a cab with you.' : 'The driver has withdrawn their ride invite.',
+            buddyRequest ? `${actorUser?.name || 'A user'} has cancelled their request to book a cab with you.` : `${actorUser?.name || 'The driver'} has withdrawn their ride invite.`,
             'ride_request_updated',
-            updatedReq
+            richUpdatedReq
           );
         } else {
-          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
+          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', richUpdatedReq);
           await this.chatService.sendNotificationToUser(
             req.ride.driverId,
             buddyRequest ? `Cab Partner Request ${status}` : `Ride Invite ${status}`,
-            buddyRequest ? `The passenger has ${status.toLowerCase()} your cab booking request.` : `The passenger has ${status.toLowerCase()} your ride invitation.`,
+            buddyRequest ? `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your cab booking request.` : `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your ride invitation.`,
             'ride_request_updated',
-            updatedReq
+            richUpdatedReq
           );
         }
       } else {
         if (status === RideStatus.CANCELLED) {
-          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', updatedReq);
+          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', richUpdatedReq);
           await this.chatService.sendNotificationToUser(
             req.ride.driverId,
             'Booking Cancelled',
-            'A rider has cancelled their booking for your ride.',
+            `${actorUser?.name || 'A rider'} has cancelled their booking for your ride.`,
             'ride_request_updated',
-            updatedReq
+            richUpdatedReq
           );
         } else {
-          this.gateway.notifyUser(req.riderId, 'ride_request_updated', updatedReq);
+          this.gateway.notifyUser(req.riderId, 'ride_request_updated', richUpdatedReq);
           await this.chatService.sendNotificationToUser(
             req.riderId,
             `Ride Request ${status}`,
-            `Your ride request has been ${status.toLowerCase()}.`,
+            `Your ride request has been ${status.toLowerCase()} by ${actorUser?.name || 'the driver'}.`,
             'ride_request_updated',
-            updatedReq
+            richUpdatedReq
           );
         }
       }
@@ -967,30 +994,61 @@ export class MatchmakingService {
     const rideId = generateDeterministicId('ride', [riderId, startPlaceName, endPlaceName, departureTime.toISOString()]);
     const isCab = type === 'buddy' || type === 'cab';
 
-    // Create / ensure seeking Ride entry in unified Ride table
-    let existingRide = await this.prisma.ride.findFirst({
+    // 1. Check if user already has an active overlapping ride in ±5 minute window
+    const overlappingActiveRide = await this.prisma.ride.findFirst({
       where: {
         driverId: riderId,
-        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED, RideStatus.STARTED] },
         startTime: {
           gte: new Date(departureTime.getTime() - 5 * 60 * 1000),
           lte: new Date(departureTime.getTime() + 5 * 60 * 1000),
+        },
+        id: { not: rideId }
+      }
+    });
+
+    if (overlappingActiveRide) {
+      throw new BadRequestException('You already have an active ride scheduled within 5 minutes of this start time.');
+    }
+
+    const overlappingActiveRequest = await this.prisma.rideRequest.findFirst({
+      where: {
+        riderId,
+        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED, RideStatus.STARTED] },
+        ride: {
+          startTime: {
+            gte: new Date(departureTime.getTime() - 5 * 60 * 1000),
+            lte: new Date(departureTime.getTime() + 5 * 60 * 1000),
+          },
+          id: { not: rideId }
         }
       }
     });
 
+    if (overlappingActiveRequest) {
+      throw new BadRequestException('You already have an active ride request scheduled within 5 minutes of this start time.');
+    }
+
+    // 2. Create / ensure seeking Ride entry in unified Ride table safely (by deterministic id)
+    let existingRide = await this.prisma.ride.findUnique({
+      where: { id: rideId }
+    });
+
     if (existingRide) {
-      if (existingRide.status === RideStatus.CANCELLED || existingRide.status === RideStatus.REJECTED) {
-        await this.prisma.ride.update({
-          where: { id: existingRide.id },
-          data: {
-            status: RideStatus.OPEN,
-            seatsAvailable: Number(seatsNeeded) || 1,
-            vehicleType: isCab ? 'CAB' : 'CAR',
-            role: 'SEEKING',
-          }
-        });
-      }
+      existingRide = await this.prisma.ride.update({
+        where: { id: rideId },
+        data: {
+          status: RideStatus.OPEN,
+          seatsAvailable: Number(seatsNeeded) || 1,
+          chargeCents: 0,
+          startTime: departureTime,
+          endTime: new Date(departureTime.getTime() + 60 * 60 * 1000),
+          startPlaceName,
+          endPlaceName,
+          vehicleType: isCab ? 'CAB' : 'CAR',
+          role: 'SEEKING',
+        }
+      });
     } else {
       existingRide = await this.prisma.ride.create({
         data: {
@@ -1023,13 +1081,16 @@ export class MatchmakingService {
     });
 
     if (existing) {
-      if (existing.status === 'CANCELLED') {
+      if (existing.status === 'CANCELLED' || existing.status === 'REJECTED' || existing.status === 'COMPLETED') {
         const updated = await this.prisma.buddyRequest.update({
           where: { id },
           data: {
             status: 'OPEN',
             seatsNeeded: Number(seatsNeeded) || 1,
-            type: type || 'buddy'
+            type: type || 'buddy',
+            startTime: departureTime,
+            startPlaceName,
+            endPlaceName,
           }
         });
         if (startWkt && endWkt) {
@@ -1361,13 +1422,26 @@ export class MatchmakingService {
     `);
 
     try {
-      this.gateway.notifyUser(buddyRequest.riderId, 'new_ride_invite', newRequest);
+      const driverUser = await this.prisma.user.findUnique({
+        where: { id: ride.driverId },
+        select: { id: true, name: true, profilePic: true, rating: true }
+      });
+
+      const richInvitePayload = {
+        ...newRequest,
+        driverName: driverUser?.name || 'Driver',
+        fareAmount: Math.round((newRequest.fareCents || 1000) / 100),
+        peerRole: 'OFFERER',
+        peerUser: driverUser
+      };
+
+      this.gateway.notifyUser(buddyRequest.riderId, 'new_ride_invite', richInvitePayload);
       await this.chatService.sendNotificationToUser(
         buddyRequest.riderId,
         'New Ride Invite',
-        'A driver has invited you to join their ride.',
+        `${driverUser?.name || 'A driver'} invited you to join their ride. Fare: ₹${richInvitePayload.fareAmount}`,
         'new_ride_invite',
-        newRequest
+        richInvitePayload
       );
     } catch (e) {
       console.error('Failed to send notification to rider:', buddyRequest.riderId, e);
@@ -1630,15 +1704,33 @@ export class MatchmakingService {
     return newRequest;
   }
 
-  async startRideRequest(requestId: string, otp: string, userId: string) {
-    const req = await this.prisma.rideRequest.findUnique({
+  async verifyOtpRequest(requestId: string, otp: string, userId: string) {
+    let req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
       include: { ride: true, requesterRide: true, rider: true }
     });
+
+    if (!req) {
+      req = await this.prisma.rideRequest.findFirst({
+        where: {
+          OR: [
+            { rideId: requestId },
+            { requesterRideId: requestId }
+          ]
+        },
+        include: { ride: true, requesterRide: true, rider: true },
+        orderBy: { updatedAt: 'desc' }
+      });
+    }
+
     if (!req) throw new NotFoundException('Ride request not found');
 
-    if (req.status !== RideStatus.ACCEPTED && req.status !== RideStatus.REQUESTED) {
-      throw new BadRequestException('Ride request must be ACCEPTED before starting');
+    if (req.otpVerified) {
+      return { ok: true, otpVerified: true, message: 'OTP already verified' };
+    }
+
+    if (req.status !== RideStatus.ACCEPTED && req.status !== RideStatus.REQUESTED && req.status !== RideStatus.STARTED) {
+      throw new BadRequestException('Ride request must be ACCEPTED before verifying OTP');
     }
 
     const hostDriverId = req.ride.driverId;
@@ -1651,10 +1743,58 @@ export class MatchmakingService {
     }
 
     const updated = await this.prisma.rideRequest.update({
+      where: { id: req.id },
+      data: {
+        otpVerified: true
+      },
+      include: {
+        ride: true,
+        rider: true
+      }
+    });
+
+    return {
+      ...updated,
+      otpVerified: true,
+      ok: true,
+    };
+  }
+
+  async startRideOnly(requestId: string, userId: string) {
+    let req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
+      include: { ride: true, requesterRide: true, rider: true }
+    });
+
+    if (!req) {
+      req = await this.prisma.rideRequest.findFirst({
+        where: {
+          OR: [
+            { rideId: requestId },
+            { requesterRideId: requestId }
+          ]
+        },
+        include: { ride: true, requesterRide: true, rider: true },
+        orderBy: { updatedAt: 'desc' }
+      });
+    }
+
+    if (!req) throw new NotFoundException('Ride request not found');
+
+    if (req.status === RideStatus.STARTED) {
+      return {
+        ...req,
+        ok: true,
+        message: 'Ride is already started'
+      };
+    }
+
+    const updated = await this.prisma.rideRequest.update({
+      where: { id: req.id },
       data: {
         status: RideStatus.STARTED,
-        startedAt: new Date()
+        startedAt: new Date(),
+        otpVerified: true
       },
       include: {
         ride: true,
@@ -1668,15 +1808,72 @@ export class MatchmakingService {
       data: { status: RideStatus.STARTED }
     });
 
-    return updated;
+    const peerId = (userId === req.ride.driverId) ? req.riderId : req.ride.driverId;
+    if (peerId) {
+      try {
+        const actorUser = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true, name: true, profilePic: true, rating: true }
+        });
+        const payloadData = {
+          ...updated,
+          peerUser: actorUser,
+          fareAmount: Math.round((updated.fareCents || 1000) / 100)
+        };
+        this.gateway.notifyUser(peerId, 'ride_started', payloadData);
+        await this.chatService.sendNotificationToUser(
+          peerId,
+          'Ride Started 🚀',
+          `Your ride with ${actorUser?.name || 'co-passenger'} has officially started!`,
+          'ride_started',
+          payloadData
+        );
+      } catch (e) {
+        console.error('Failed to send start ride notification:', e);
+      }
+    }
+
+    return {
+      ...updated,
+      ok: true
+    };
+  }
+
+  async startRideRequest(requestId: string, otp?: string, userId?: string) {
+    if (otp && userId) {
+      await this.verifyOtpRequest(requestId, otp, userId);
+    }
+    return this.startRideOnly(requestId, userId || '');
   }
 
   async completeRideRequest(requestId: string, actualFare: number | undefined, userId: string) {
-    const req = await this.prisma.rideRequest.findUnique({
+    let req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
       include: { ride: { include: { driver: true } } }
     });
+
+    if (!req) {
+      req = await this.prisma.rideRequest.findFirst({
+        where: {
+          OR: [
+            { rideId: requestId },
+            { requesterRideId: requestId }
+          ]
+        },
+        include: { ride: { include: { driver: true } } },
+        orderBy: { updatedAt: 'desc' }
+      });
+    }
+
     if (!req) throw new NotFoundException('Ride request not found');
+
+    if (req.status === RideStatus.COMPLETED) {
+      return {
+        ...req,
+        ok: true,
+        message: 'Ride request is already completed'
+      };
+    }
 
     if (req.status !== RideStatus.STARTED && req.status !== RideStatus.ACCEPTED) {
       throw new BadRequestException('Ride request must be ACCEPTED or STARTED before completing');
@@ -1700,7 +1897,7 @@ export class MatchmakingService {
       const riderDistResult = await this.prisma.$queryRaw<any[]>(Prisma.sql`
         SELECT ST_Distance(rr."riderStart"::geography, rr."riderEnd"::geography) as distance
         FROM "RideRequest" rr
-        WHERE rr.id = ${requestId}
+        WHERE rr.id = ${req.id}
       `);
 
       const d_ride = driverDistResult?.[0]?.distance || 1000;
@@ -1717,7 +1914,7 @@ export class MatchmakingService {
     }
 
     const updated = await this.prisma.rideRequest.update({
-      where: { id: requestId },
+      where: { id: req.id },
       data: {
         status: RideStatus.COMPLETED,
         completedAt: new Date(),
@@ -1736,6 +1933,31 @@ export class MatchmakingService {
       where: { id: { in: linkedRideIds } },
       data: { status: RideStatus.COMPLETED }
     });
+
+    const peerId = (userId === req.ride.driverId) ? req.riderId : req.ride.driverId;
+    if (peerId) {
+      try {
+        const actorUser = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { id: true, name: true, profilePic: true, rating: true }
+        });
+        const payloadData = {
+          ...updated,
+          peerUser: actorUser,
+          actualFare: actualFare || null
+        };
+        this.gateway.notifyUser(peerId, 'ride_completed', payloadData);
+        await this.chatService.sendNotificationToUser(
+          peerId,
+          'Ride Completed 🏁',
+          `Your ride with ${actorUser?.name || 'co-passenger'} has been completed!`,
+          'ride_completed',
+          payloadData
+        );
+      } catch (e) {
+        console.error('Failed to send complete ride notification:', e);
+      }
+    }
 
     return updated;
   }

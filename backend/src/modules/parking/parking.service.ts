@@ -442,4 +442,35 @@ export class ParkingService implements OnModuleInit {
       },
     });
   }
+
+  // Fetch a single booking/ticket by ID for deep link and web scanning
+  async getTicketById(id: string) {
+    const booking = await this.prisma.parkingBooking.findUnique({
+      where: { id },
+      include: {
+        spot: {
+          include: {
+            owner: {
+              select: { name: true, email: true },
+            },
+          },
+        },
+        user: {
+          select: { id: true, name: true, email: true },
+        },
+      },
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Parking ticket booking not found.');
+    }
+
+    const now = new Date();
+    if (booking.status === BookingStatus.ACCEPTED && booking.endTime < now) {
+      return { ...booking, status: 'EXPIRED' as any };
+    }
+
+    return booking;
+  }
 }
+

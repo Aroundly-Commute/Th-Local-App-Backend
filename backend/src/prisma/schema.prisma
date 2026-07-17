@@ -87,6 +87,7 @@ model RideRequest {
   buddyRequestId    String?
 
   otp               String?
+  otpVerified       Boolean    @default(false)
   actualFare        Float?
   riderShare        Float?
   driverShare       Float?
