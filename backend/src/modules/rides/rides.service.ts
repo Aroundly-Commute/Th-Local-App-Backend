@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { Prisma, RideStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -12,8 +12,40 @@ const getDeterministicChatId = (user1: string, user2: string) => {
   return `chat_${sorted[0]}_${sorted[1]}`;
 };
 
+function computeOtpRoleAndCode(params: {
+  userId: string;
+  hostDriverId: string;
+  riderId: string;
+  vehicleType: string;
+  isInvitation: boolean;
+  requestOtp?: string | null;
+}) {
+  const { userId, hostDriverId, riderId, vehicleType, isInvitation, requestOtp } = params;
+  const { getUserStaticOtp } = require('../matchmaking/matchmaking.service');
+
+  const isCab = vehicleType === 'CAB';
+  const acceptorUserId = !isCab
+    ? hostDriverId
+    : (isInvitation ? riderId : hostDriverId);
+
+  const can_enter_otp = userId === acceptorUserId;
+  let my_display_otp = '----';
+
+  if (!can_enter_otp) {
+    if (userId === riderId) {
+      my_display_otp = requestOtp || getUserStaticOtp(riderId);
+    } else {
+      my_display_otp = getUserStaticOtp(hostDriverId);
+    }
+  }
+
+  return { can_enter_otp, my_display_otp };
+}
+
 @Injectable()
 export class RidesService {
+  private readonly logger = new Logger(RidesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly chatService: ChatService,
@@ -36,36 +68,41 @@ export class RidesService {
     const endWkt = pointWkt(dto.end);
     const routeWkt = lineStringWkt(dto.route);
 
+    this.logger.log(`Publishing ride: Driver=${driverId}, From=${dto.startPlaceName}, To=${dto.endPlaceName}, StartTime=${startTime.toISOString()}`);
     const id = generateDeterministicId('ride', [driverId, dto.startPlaceName, dto.endPlaceName, startTime.toISOString()]);
 
     const overlappingDriverRides = await this.prisma.ride.findFirst({
       where: {
         driverId,
-        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED] },
-        startTime: { lt: endTime },
-        endTime: { gt: startTime },
+        status: { in: [RideStatus.OPEN, RideStatus.REQUESTED, RideStatus.ACCEPTED, RideStatus.STARTED] },
+        startTime: {
+          gte: new Date(startTime.getTime() - 5 * 60 * 1000),
+          lte: new Date(startTime.getTime() + 5 * 60 * 1000),
+        },
         id: { not: id }
       }
     });
 
     if (overlappingDriverRides) {
-      throw new BadRequestException('You already have a published ride during this time window.');
+      throw new BadRequestException('You already have an active ride scheduled within 5 minutes of this start time.');
     }
 
     const overlappingRiderRequests = await this.prisma.rideRequest.findFirst({
       where: {
         riderId: driverId,
-        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] },
+        status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED, RideStatus.STARTED] },
         ride: {
-          startTime: { lt: endTime },
-          endTime: { gt: startTime },
+          startTime: {
+            gte: new Date(startTime.getTime() - 5 * 60 * 1000),
+            lte: new Date(startTime.getTime() + 5 * 60 * 1000),
+          },
           id: { not: id }
         }
       }
     });
 
     if (overlappingRiderRequests) {
-      throw new BadRequestException('You already have a requested ride during this time window.');
+      throw new BadRequestException('You already have an active ride request scheduled within 5 minutes of this start time.');
     }
 
     const now = new Date();
@@ -340,7 +377,11 @@ export class RidesService {
             rider_id: string;
             rider_name: string;
             rider_avatar: string | null;
+            rider_rating?: number | null;
+            rider_gender?: string | null;
             status: string;
+            otp: string | null;
+            otp_verified: boolean | null;
             fareCents: number;
             seats: number;
             riderStartGeoJson: string | null;
@@ -351,10 +392,14 @@ export class RidesService {
         >(Prisma.sql`
           SELECT
             rr."id" as "request_id",
-            rr."riderId" as "rider_id",
-            u."name" as "rider_name",
-            u."profilePic" as "rider_avatar",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."id" ELSE u."id" END as "rider_id",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."name" ELSE u."name" END as "rider_name",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."profilePic" ELSE u."profilePic" END as "rider_avatar",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."rating" ELSE u."rating" END as "rider_rating",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."gender" ELSE u."gender" END as "rider_gender",
             rr."status"::text,
+            rr."otp" as "otp",
+            rr."otpVerified" as "otp_verified",
             rr."fareCents",
             rr."seats",
             rr."riderStartName",
@@ -363,8 +408,10 @@ export class RidesService {
             ST_AsGeoJSON(rr."riderEnd")   as "riderEndGeoJson"
           FROM "RideRequest" rr
           JOIN "User" u ON rr."riderId" = u."id"
-          WHERE rr."rideId" = ${id}
-            AND rr."status"::text = 'ACCEPTED'
+          JOIN "Ride" host_ride ON rr."rideId" = host_ride."id"
+          JOIN "User" host_driver ON host_ride."driverId" = host_driver."id"
+          WHERE (rr."rideId" = ${id} OR rr."requesterRideId" = ${id})
+            AND rr."status"::text IN ('ACCEPTED', 'STARTED', 'COMPLETED')
         `)
       : this.prisma.$queryRaw<
           Array<{
@@ -372,7 +419,11 @@ export class RidesService {
             rider_id: string;
             rider_name: string;
             rider_avatar: string | null;
+            rider_rating?: number | null;
+            rider_gender?: string | null;
             status: string;
+            otp: string | null;
+            otp_verified: boolean | null;
             fareCents: number;
             seats: number;
             riderStartGeoJson: string | null;
@@ -383,10 +434,14 @@ export class RidesService {
         >(Prisma.sql`
           SELECT
             rr."id" as "request_id",
-            rr."riderId" as "rider_id",
-            u."name" as "rider_name",
-            u."profilePic" as "rider_avatar",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."id" ELSE u."id" END as "rider_id",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."name" ELSE u."name" END as "rider_name",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."profilePic" ELSE u."profilePic" END as "rider_avatar",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."rating" ELSE u."rating" END as "rider_rating",
+            CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."gender" ELSE u."gender" END as "rider_gender",
             rr."status"::text,
+            rr."otp" as "otp",
+            rr."otpVerified" as "otp_verified",
             rr."fareCents",
             rr."seats",
             rr."riderStartName",
@@ -395,8 +450,10 @@ export class RidesService {
             ST_AsGeoJSON(rr."riderEnd")   as "riderEndGeoJson"
           FROM "RideRequest" rr
           JOIN "User" u ON rr."riderId" = u."id"
-          WHERE rr."rideId" = ${id}
-            AND rr."status"::text IN ('REQUESTED', 'ACCEPTED')
+          JOIN "Ride" host_ride ON rr."rideId" = host_ride."id"
+          JOIN "User" host_driver ON host_ride."driverId" = host_driver."id"
+          WHERE (rr."rideId" = ${id} OR rr."requesterRideId" = ${id})
+            AND rr."status"::text IN ('REQUESTED', 'ACCEPTED', 'STARTED', 'COMPLETED')
         `)
     );
 
@@ -411,12 +468,16 @@ export class RidesService {
       passengerReviewMap.set(rev.toUserId, rev.rating);
     });
 
+    const { getUserStaticOtp } = require('../matchmaking/matchmaking.service');
     (ride as any).passengers = passengerRows.map(rr => ({
       request_id: rr.request_id,
       rider_id: rr.rider_id,
       rider_name: rr.rider_name || 'Passenger',
       rider_avatar: rr.rider_avatar || null,
+      rider_rating: rr.rider_rating ?? 5.0,
+      rider_gender: rr.rider_gender || null,
       status: rr.status,
+      otp_verified: rr.otp_verified || false,
       chat_id: getDeterministicChatId(ride.driverId, rr.rider_id),
       fareCents: rr.fareCents,
       seats: rr.seats,
@@ -425,29 +486,63 @@ export class RidesService {
       riderStartGeoJson: rr.riderStartGeoJson || null,
       riderEndGeoJson: rr.riderEndGeoJson || null,
       my_review_rating: passengerReviewMap.get(rr.rider_id) || null,
+      otp: rr.otp || getUserStaticOtp(rr.rider_id),
     }));
 
     let my_review_rating: number | null = null;
-    if (userId && userId !== ride.driverId) {
+    if (userId) {
       const myRequest = await this.prisma.rideRequest.findFirst({
-        where: { rideId: id, riderId: userId }
+        where: {
+          OR: [
+            { rideId: id, riderId: userId },
+            { requesterRideId: id, riderId: userId },
+            { rideId: id, ride: { driverId: userId } },
+            { requesterRideId: id, requesterRide: { driverId: userId } }
+          ],
+          status: { in: ['ACCEPTED', 'STARTED', 'COMPLETED', 'REQUESTED'] }
+        },
+        include: {
+          rider: true,
+          ride: { include: { driver: true } },
+          requesterRide: { include: { driver: true } }
+        }
       });
       if (myRequest) {
         (ride as any).my_request_id = myRequest.id;
         (ride as any).my_request_status = myRequest.status;
-        (ride as any).my_request_is_invitation = myRequest.isInvitation || false;
+        (ride as any).my_request_is_invitation = (myRequest.riderId === userId) ? (myRequest.isInvitation || false) : false;
+        (ride as any).my_request_otp_verified = myRequest.otpVerified || false;
         (ride as any).my_chat_id = getDeterministicChatId(ride.driverId, userId);
         (ride as any).my_fare_cents = myRequest.fareCents;
+        (ride as any).my_request_otp = myRequest.otp || getUserStaticOtp(userId);
+
+        let peerUser: any = null;
+        if (myRequest.riderId && myRequest.riderId !== userId) {
+          peerUser = myRequest.rider;
+        } else if (myRequest.ride && myRequest.ride.driverId !== userId) {
+          peerUser = myRequest.ride.driver;
+        } else if (myRequest.requesterRide && myRequest.requesterRide.driverId !== userId) {
+          peerUser = myRequest.requesterRide.driver;
+        }
+        if (peerUser) {
+          (ride as any).peer_id = peerUser.id;
+          (ride as any).peer_name = peerUser.name;
+          (ride as any).peer_avatar = peerUser.profilePic;
+          (ride as any).peer_rating = peerUser.rating ?? 5.0;
+          (ride as any).peer_gender = peerUser.gender;
+        }
       }
 
-      const review = await this.prisma.review.findFirst({
-        where: {
-          fromUserId: userId,
-          toUserId: ride.driverId,
-          rideId: id
-        }
-      });
-      my_review_rating = review ? review.rating : null;
+      if (userId !== ride.driverId) {
+        const review = await this.prisma.review.findFirst({
+          where: {
+            fromUserId: userId,
+            toUserId: ride.driverId,
+            rideId: id
+          }
+        });
+        my_review_rating = review ? review.rating : null;
+      }
     }
 
     const distanceMeters = Number(ride.distanceMeters || 0);
@@ -465,15 +560,32 @@ export class RidesService {
       fuelType: ride.fuelType || 'Petrol'
     });
 
-    const { getUserStaticOtp } = require('../matchmaking/matchmaking.service');
-    const my_otp = userId ? getUserStaticOtp(userId) : null;
+    const activeReq = (ride as any).my_request_id ? await this.prisma.rideRequest.findUnique({
+      where: { id: (ride as any).my_request_id },
+      include: { ride: true }
+    }) : null;
+
+    const hostDriverId = activeReq ? activeReq.ride.driverId : ride.driverId;
+    const riderId = activeReq ? activeReq.riderId : ((ride as any).passengers?.[0]?.rider_id || '');
+    const isInvitation = activeReq ? Boolean(activeReq.isInvitation) : false;
+    const requestOtp = activeReq ? activeReq.otp : ((ride as any).passengers?.[0]?.otp || null);
+
+    const otpRoleInfo = computeOtpRoleAndCode({
+      userId: userId || '',
+      hostDriverId,
+      riderId,
+      vehicleType: ride.vehicleType,
+      isInvitation,
+      requestOtp
+    });
+
     let peerUserId: string | null = null;
     if (userId) {
-      if (userId === ride.driverId) {
+      if (userId === hostDriverId) {
         const firstPass = (ride as any).passengers?.[0];
         peerUserId = firstPass ? firstPass.rider_id : null;
       } else {
-        peerUserId = ride.driverId;
+        peerUserId = hostDriverId;
       }
     }
     const peer_otp = peerUserId ? getUserStaticOtp(peerUserId) : null;
@@ -484,8 +596,10 @@ export class RidesService {
       co2_saved_kg,
       my_review_rating,
       estimatedFare,
-      my_otp,
+      my_otp: otpRoleInfo.my_display_otp,
       peer_otp,
+      can_enter_otp: otpRoleInfo.can_enter_otp,
+      my_display_otp: otpRoleInfo.my_display_otp,
     };
   }
 
@@ -670,7 +784,7 @@ export class RidesService {
     // Populate upcoming and past strictly from the unified Ride table (where driverId = userId)
     driverRides.forEach(r => {
       const mapped = this.mapDriverRide(r, userId, reviewMap);
-      if (r.status === 'CANCELLED' || r.startTime < new Date()) {
+      if (r.status === 'CANCELLED' || r.status === 'COMPLETED' || r.startTime < new Date()) {
         past.push(mapped);
       } else {
         upcoming.push(mapped);
@@ -679,7 +793,7 @@ export class RidesService {
         r.requests.forEach(rr => {
           if (rr.status === 'REQUESTED' && rr.isInvitation === true) {
             (rr as any).ride = r;
-            const mappedInvitation = this.mapReceivedRequest(rr, reviewMap);
+            const mappedInvitation = this.mapReceivedRequest(rr, userId, reviewMap);
             requested.push({
               ...mappedInvitation,
               section: 'sent',
@@ -695,7 +809,7 @@ export class RidesService {
 
     // Populate pending outgoing and incoming requests for Requests tab
     riderRequests.forEach(rr => {
-      const mapped = this.mapRiderRequest(rr, reviewMap);
+      const mapped = this.mapRiderRequest(rr, userId, reviewMap);
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
       if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
         if (rr.isInvitation === false) {
@@ -717,8 +831,8 @@ export class RidesService {
     receivedRequests.forEach(rr => {
       const isDriver = rr.ride.driverId === userId;
       const mapped = isDriver
-        ? this.mapReceivedRequest(rr, reviewMap)
-        : this.mapRiderRequest(rr, reviewMap);
+        ? this.mapReceivedRequest(rr, userId, reviewMap)
+        : this.mapRiderRequest(rr, userId, reviewMap);
 
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
       if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
@@ -806,8 +920,24 @@ export class RidesService {
     const rawPrice = isConfirmed && acceptedReq ? (acceptedReq.fareCents ? acceptedReq.fareCents / 100 : r.chargeCents / 100) : r.chargeCents / 100;
     const price_per_seat = (isSeeking || isCab) ? null : rawPrice;
 
+    const hostDriverId = r.driverId;
+    const riderId = acceptedReq ? acceptedReq.riderId : (r.passengers?.[0]?.rider_id || '');
+    const isInvitation = acceptedReq ? Boolean(acceptedReq.isInvitation) : false;
+    const requestOtp = acceptedReq ? acceptedReq.otp : (r.passengers?.[0]?.otp || null);
+
+    const otpRoleInfo = computeOtpRoleAndCode({
+      userId,
+      hostDriverId,
+      riderId,
+      vehicleType: r.vehicleType,
+      isInvitation,
+      requestOtp
+    });
+
     return {
       id: r.id,
+      request_id: acceptedReq?.id || r.requests?.[0]?.id || null,
+      request_status: acceptedReq?.status || null,
       role: isSeeking ? 'rider' : 'driver',
       ride_role: isSeeking ? 'SEEKING' : 'OFFERED',
       isConfirmed,
@@ -836,6 +966,7 @@ export class RidesService {
           seats: rr.seats,
           my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${passengerUser?.id || rr.riderId}`) || null) : null,
           otp: rr.otp,
+          otp_verified: rr.otpVerified || false,
           actual_fare: rr.actualFare,
           rider_share: rr.riderShare,
           driver_share: rr.driverShare,
@@ -846,6 +977,9 @@ export class RidesService {
       peer_name,
       peer_avatar,
       peer_rating,
+      can_enter_otp: otpRoleInfo.can_enter_otp,
+      my_display_otp: otpRoleInfo.my_display_otp,
+      otp: otpRoleInfo.my_display_otp,
     };
   }
 
@@ -1119,21 +1253,31 @@ export class RidesService {
     }
 
     try {
+      const fareAmt = Math.round((calculatedFareCents || 1000) / 100);
+      const payloadData = {
+        id: requestId.id,
+        rideId: ride.id,
+        riderName: requestId.rider.name,
+        riderStartName: requestId.riderStartName,
+        riderEndName: requestId.riderEndName,
+        riderStartTime: requestId.riderStartTime,
+        status: requestId.status,
+        fareCents: calculatedFareCents,
+        fareAmount: fareAmt,
+        peerRole: 'SEEKER',
+        peerUser: {
+          id: requestId.rider.id,
+          name: requestId.rider.name,
+          profilePic: requestId.rider.profilePic,
+          rating: requestId.rider.rating
+        }
+      };
       await this.chatService.sendNotificationToUser(
         ride.driverId,
         'New Booking Request',
-        `${requestId.rider.name} requested to join your ride.`,
+        `${requestId.rider.name} requested to join your ride. Earnings: ₹${fareAmt}`,
         'new_ride_request',
-        {
-          id: requestId.id,
-          rideId: ride.id,
-          riderName: requestId.rider.name,
-          riderStartName: requestId.riderStartName,
-          riderEndName: requestId.riderEndName,
-          riderStartTime: requestId.riderStartTime,
-          status: requestId.status,
-          fareCents: calculatedFareCents
-        }
+        payloadData
       );
     } catch (e) {
       console.error('Failed to send notification to driver:', ride.driverId, e);
@@ -1142,7 +1286,7 @@ export class RidesService {
     return { ok: true, chat_id: getDeterministicChatId(ride.driverId, userId) };
   }
 
-  private mapRiderRequest(rr: any, reviewMap?: Map<string, number>) {
+  private mapRiderRequest(rr: any, userId: string, reviewMap?: Map<string, number>) {
     const r = rr.ride;
     const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
     const isSeekingMatch = r.role === 'SEEKING' || r.vehicleType === 'CAB';
@@ -1159,6 +1303,20 @@ export class RidesService {
     // Price protection: Cab share & seeking matches have NO price info
     const rawPrice = rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100;
     const price_per_seat = isSeekingMatch ? null : rawPrice;
+
+    const hostDriverId = r.driverId;
+    const riderId = rr.riderId;
+    const isInvitation = Boolean(rr.isInvitation);
+    const requestOtp = rr.otp;
+
+    const otpRoleInfo = computeOtpRoleAndCode({
+      userId,
+      hostDriverId,
+      riderId,
+      vehicleType: r.vehicleType,
+      isInvitation,
+      requestOtp
+    });
 
     return {
       id: r.id,
@@ -1186,15 +1344,18 @@ export class RidesService {
       peer_rating,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${r.driverId}`) || null) : null,
-      otp: rr.otp,
+      otp: otpRoleInfo.my_display_otp,
+      otp_verified: rr.otpVerified || false,
       actual_fare: rr.actualFare,
       rider_share: rr.riderShare,
       driver_share: rr.driverShare,
       buddyRequestId: rr.buddyRequestId,
+      can_enter_otp: otpRoleInfo.can_enter_otp,
+      my_display_otp: otpRoleInfo.my_display_otp,
     };
   }
 
-  private mapReceivedRequest(rr: any, reviewMap?: Map<string, number>) {
+  private mapReceivedRequest(rr: any, userId: string, reviewMap?: Map<string, number>) {
     const r = rr.ride;
     const isConfirmed = rr.status === 'ACCEPTED' || rr.status === 'STARTED' || rr.status === 'COMPLETED';
     const isSeekingMatch = r.role === 'SEEKING' || r.vehicleType === 'CAB';
@@ -1208,6 +1369,20 @@ export class RidesService {
     // Price protection: Seeking matches & Cab share have NO price info
     const rawPrice = rr.fareCents ? rr.fareCents / 100 : r.chargeCents / 100;
     const price_per_seat = isSeekingMatch ? null : rawPrice;
+
+    const hostDriverId = r.driverId;
+    const riderId = rr.riderId;
+    const isInvitation = Boolean(rr.isInvitation);
+    const requestOtp = rr.otp;
+
+    const otpRoleInfo = computeOtpRoleAndCode({
+      userId,
+      hostDriverId,
+      riderId,
+      vehicleType: r.vehicleType,
+      isInvitation,
+      requestOtp
+    });
 
     return {
       id: r.id,
@@ -1236,11 +1411,14 @@ export class RidesService {
       peer_rating,
       is_invitation: rr.isInvitation || false,
       my_review_rating: reviewMap ? (reviewMap.get(`${r.id}:${rr.riderId}`) || null) : null,
-      otp: rr.otp,
+      otp: otpRoleInfo.my_display_otp,
+      otp_verified: rr.otpVerified || false,
       actual_fare: rr.actualFare,
       rider_share: rr.riderShare,
       driver_share: rr.driverShare,
       buddyRequestId: rr.buddyRequestId,
+      can_enter_otp: otpRoleInfo.can_enter_otp,
+      my_display_otp: otpRoleInfo.my_display_otp,
     };
   }
 }
