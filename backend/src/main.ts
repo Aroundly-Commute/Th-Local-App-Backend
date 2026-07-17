@@ -9,6 +9,7 @@ import { json, urlencoded } from 'express';
 import * as express from 'express';
 import * as path from 'path';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { ChatGateway } from './modules/chat/chat.gateway';
 
 import * as admin from 'firebase-admin';
@@ -66,6 +67,7 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule, { cors: true });
   app.useGlobalInterceptors(new LoggingInterceptor());
+  app.useGlobalFilters(new AllExceptionsFilter());
   
   // Serve static files from the uploads directory
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));

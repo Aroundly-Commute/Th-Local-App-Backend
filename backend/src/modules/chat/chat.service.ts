@@ -70,8 +70,8 @@ export class ChatService {
     const messages = await this.prisma.message.findMany({
       where: {
         OR: [
-          { senderId: userId },
-          { chatId: { contains: userId } }
+          { chatId: { startsWith: `chat_${userId}_` } },
+          { chatId: { endsWith: `_${userId}` } }
         ]
       },
       orderBy: { createdAt: 'desc' },
@@ -79,16 +79,41 @@ export class ChatService {
       include: { sender: true }
     });
 
-    return messages.map(m => ({
-      chat_id: m.chatId,
-      last_message: m.text,
-      last_time: m.createdAt.toISOString(),
-      other_user: {
-        id: m.senderId === userId ? "other" : m.senderId,
-        name: m.senderId === userId ? "Someone" : m.sender.name,
-      },
-      ride_route: "Ride Chat"
-    }));
+    const chats: any[] = [];
+    for (const m of messages) {
+      let otherUserId: string | null = null;
+      let otherUserName = "Someone";
+
+      if (m.senderId === userId) {
+        const recipientId = await this.getRecipientId(m.chatId, userId);
+        otherUserId = recipientId;
+        if (otherUserId) {
+          const otherUser = await this.prisma.user.findUnique({
+            where: { id: otherUserId },
+            select: { name: true }
+          });
+          if (otherUser) {
+            otherUserName = otherUser.name;
+          }
+        }
+      } else {
+        otherUserId = m.senderId;
+        otherUserName = m.sender.name;
+      }
+
+      chats.push({
+        chat_id: m.chatId,
+        last_message: m.text,
+        last_time: m.createdAt.toISOString(),
+        other_user: {
+          id: otherUserId || "other",
+          name: otherUserName,
+        },
+        ride_route: "Ride Chat"
+      });
+    }
+
+    return chats;
   }
 
   async getMessages(chatId: string) {
@@ -131,38 +156,14 @@ export class ChatService {
 
   async getRecipientId(chatId: string, senderId: string): Promise<string | null> {
     try {
-      if (chatId.startsWith('buddy_')) {
-        const parts = chatId.split('_');
-        const buddyId = parts[1];
-        const driverId = parts[2];
-        const buddyRequest = await this.prisma.buddyRequest.findUnique({
-          where: { id: buddyId }
-        });
-        if (buddyRequest) {
-          return senderId === buddyRequest.riderId ? driverId : buddyRequest.riderId;
+      if (chatId.startsWith('chat_')) {
+        const parts = chatId.replace(/^chat_/, '').split('_');
+        if (parts.length === 2) {
+          const user1 = parts[0];
+          const user2 = parts[1];
+          return senderId === user1 ? user2 : user1;
         }
       }
-
-      const id = chatId.replace(/^chat_/, '');
-
-      // Try RideRequest
-      const rideRequest = await this.prisma.rideRequest.findUnique({
-        where: { id },
-        include: { ride: true }
-      });
-      if (rideRequest) {
-        return senderId === rideRequest.riderId ? rideRequest.ride.driverId : rideRequest.riderId;
-      }
-
-      // Try ParkingBooking
-      const parkingBooking = await this.prisma.parkingBooking.findUnique({
-        where: { id },
-        include: { spot: true }
-      });
-      if (parkingBooking && parkingBooking.spot?.ownerId) {
-        return senderId === parkingBooking.userId ? parkingBooking.spot.ownerId : parkingBooking.userId;
-      }
-
     } catch (err) {
       console.error(`[CHAT] Error resolving recipient for chatId: ${chatId}`, err);
     }
@@ -310,30 +311,39 @@ export class ChatService {
 
   async sendNotificationToUser(userId: string, title: string, body: string, type: string, payloadData: any) {
     const ws = this.notificationClients.get(userId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    const isOnline = ws && ws.readyState === WebSocket.OPEN;
+
+    if (isOnline) {
       // In-app real-time notification
-      console.log(`[NOTIFICATION] Sending in-app notification to ${userId} for type: ${type}`);
+      console.log(`[NOTIFICATION] Sending in-app WS notification to ${userId} for type: ${type}`);
       ws.send(JSON.stringify({ type, payload: payloadData }));
     } else {
-      // Offline notification queueing & Firebase push
-      console.log(`[NOTIFICATION] User ${userId} is offline. Queueing pending notification for type: ${type}`);
+      // Offline notification queueing for when user reopens app
+      console.log(`[NOTIFICATION] User ${userId} is offline/background. Queueing pending notification for type: ${type}`);
       await this.prisma.pendingNotification.create({
         data: {
           userId,
           type,
-          payload: JSON.stringify(payloadData)
+          payload: typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData)
         }
       });
+    }
 
+    // Always attempt FCM push notification if user has fcmToken (critical for system tray notifications when app is in background or closed)
+    try {
       const user = await this.prisma.user.findUnique({
-        where: { id: userId }
+        where: { id: userId },
+        select: { fcmToken: true }
       });
       if (user?.fcmToken) {
         await this.sendFcmPush(user.fcmToken, title, body, {
           type,
-          payload: JSON.stringify(payloadData)
+          payload: typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData)
         });
       }
+    } catch (e: any) {
+      console.error(`[NOTIFICATION] Error sending FCM push to user ${userId}:`, e?.message || e);
     }
   }
 }
+

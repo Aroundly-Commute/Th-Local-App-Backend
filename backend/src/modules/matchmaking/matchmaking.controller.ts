@@ -25,6 +25,11 @@ export class MatchmakingController {
     return this.mm.listRequests(rideId, req.user.id);
   }
 
+  @Get('requests/received')
+  async listReceivedRequests(@Request() req: any) {
+    return this.mm.listReceivedRequests(req.user.id);
+  }
+
   @Patch('requests/:id')
   async updateRequest(
     @Param('id') id: string,
@@ -32,6 +37,41 @@ export class MatchmakingController {
     @Request() req: any,
   ) {
     return this.mm.updateRequestStatus(id, body.status, req.user.id);
+  }
+
+  @Patch('requests/:id/verify-otp')
+  async verifyOtpRequest(
+    @Param('id') id: string,
+    @Body() body: { otp: string },
+    @Request() req: any,
+  ) {
+    return this.mm.verifyOtpRequest(id, body.otp, req.user.id);
+  }
+
+  @Patch('requests/:id/start-ride')
+  async startRideOnly(
+    @Param('id') id: string,
+    @Request() req: any,
+  ) {
+    return this.mm.startRideOnly(id, req.user.id);
+  }
+
+  @Patch('requests/:id/start')
+  async startRideRequest(
+    @Param('id') id: string,
+    @Body() body: { otp?: string },
+    @Request() req: any,
+  ) {
+    return this.mm.startRideRequest(id, body?.otp, req.user.id);
+  }
+
+  @Patch('requests/:id/complete')
+  async completeRideRequest(
+    @Param('id') id: string,
+    @Body() body: { actualFare?: number },
+    @Request() req: any,
+  ) {
+    return this.mm.completeRideRequest(id, body.actualFare, req.user.id);
   }
 
   @Patch('buddies/:id')
@@ -48,6 +88,16 @@ export class MatchmakingController {
     return this.mm.createBuddyRequest(body, req.user.id);
   }
 
+  @Post('buddies/request')
+  async requestBuddyMatch(@Request() req: any, @Body() body: { buddyRequestId: string }) {
+    return this.mm.requestBuddyMatch(body.buddyRequestId, req.user.id);
+  }
+
+  @Post('invite')
+  async invitePassenger(@Request() req: any, @Body() body: { rideId: string; buddyRequestId: string }) {
+    return this.mm.inviteBuddy(body, req.user.id);
+  }
+
   @Get('buddies/:id')
   async getBuddyRequest(@Param('id') id: string) {
     return this.mm.getBuddyRequest(id);
@@ -58,10 +108,16 @@ export class MatchmakingController {
     @Request() req: any,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('latitude') latitude?: string,
+    @Query('longitude') longitude?: string,
+    @Query('radius') radius?: string,
   ) {
     const pageNum = page ? parseInt(page, 10) : undefined;
     const limitNum = limit ? parseInt(limit, 10) : undefined;
-    return this.mm.listBuddyRequests(req.user.id, pageNum, limitNum);
+    const latNum = latitude ? parseFloat(latitude) : undefined;
+    const lngNum = longitude ? parseFloat(longitude) : undefined;
+    const radNum = radius ? parseFloat(radius) : undefined;
+    return this.mm.listBuddyRequests(req.user.id, pageNum, limitNum, latNum, lngNum, radNum);
   }
 }
 

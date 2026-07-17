@@ -107,4 +107,11 @@ export class ParkingController {
   ) {
     return this.parkingService.updateSpotPrices(req.user.id, spotId, body);
   }
+
+  // Get ticket by ID for scanning / deep link viewing
+  @Get('ticket/:id')
+  async getTicketById(@Param('id') id: string) {
+    return this.parkingService.getTicketById(id);
+  }
 }
+

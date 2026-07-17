@@ -4,7 +4,7 @@
   "private": true,
   "description": "NestJS backend for carpool (Postgres + PostGIS + Prisma).",
   "scripts": {
-    "dev": "nest start --watch",
+    "dev": "npx -y kill-port 3000 && nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
     "prisma:generate": "prisma generate --schema src/prisma/schema.prisma",
