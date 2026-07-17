@@ -311,30 +311,39 @@ export class ChatService {
 
   async sendNotificationToUser(userId: string, title: string, body: string, type: string, payloadData: any) {
     const ws = this.notificationClients.get(userId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    const isOnline = ws && ws.readyState === WebSocket.OPEN;
+
+    if (isOnline) {
       // In-app real-time notification
-      console.log(`[NOTIFICATION] Sending in-app notification to ${userId} for type: ${type}`);
+      console.log(`[NOTIFICATION] Sending in-app WS notification to ${userId} for type: ${type}`);
       ws.send(JSON.stringify({ type, payload: payloadData }));
     } else {
-      // Offline notification queueing & Firebase push
-      console.log(`[NOTIFICATION] User ${userId} is offline. Queueing pending notification for type: ${type}`);
+      // Offline notification queueing for when user reopens app
+      console.log(`[NOTIFICATION] User ${userId} is offline/background. Queueing pending notification for type: ${type}`);
       await this.prisma.pendingNotification.create({
         data: {
           userId,
           type,
-          payload: JSON.stringify(payloadData)
+          payload: typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData)
         }
       });
+    }
 
+    // Always attempt FCM push notification if user has fcmToken (critical for system tray notifications when app is in background or closed)
+    try {
       const user = await this.prisma.user.findUnique({
-        where: { id: userId }
+        where: { id: userId },
+        select: { fcmToken: true }
       });
       if (user?.fcmToken) {
         await this.sendFcmPush(user.fcmToken, title, body, {
           type,
-          payload: JSON.stringify(payloadData)
+          payload: typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData)
         });
       }
+    } catch (e: any) {
+      console.error(`[NOTIFICATION] Error sending FCM push to user ${userId}:`, e?.message || e);
     }
   }
 }
+

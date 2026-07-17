@@ -16,22 +16,40 @@ export class LoggingInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest();
     const { method, url, body } = request;
     const now = Date.now();
+    const user: any = request.user;
+    const userId = user?.id || user?.sub || 'anonymous';
 
-    this.logger.log(`Incoming Request: ${method} ${url} - Body: ${JSON.stringify(body)}`);
+    const sanitizedBody = this.sanitizePayload(body);
+    const bodyStr = sanitizedBody && Object.keys(sanitizedBody).length > 0 ? ` - Body: ${JSON.stringify(sanitizedBody)}` : '';
+
+    this.logger.log(`[REQ] ${method} ${url} (User: ${userId})${bodyStr}`);
 
     return next.handle().pipe(
       tap((response) => {
         const delay = Date.now() - now;
-        this.logger.log(`Outgoing Response: ${method} ${url} +${delay}ms - Status: 200/201`);
+        const statusCode = context.switchToHttp().getResponse().statusCode || 200;
+        this.logger.log(`[RES] ${method} ${url} Status: ${statusCode} +${delay}ms (User: ${userId})`);
       }),
       catchError((error) => {
         const delay = Date.now() - now;
+        const status = error.status || 500;
         this.logger.error(
-          `Error Response: ${method} ${url} +${delay}ms - Status: ${error.status || 500} - Message: ${error.message}`,
-          error.stack,
+          `[ERR] ${method} ${url} Status: ${status} +${delay}ms (User: ${userId}) - ${error.message}`,
         );
         return throwError(() => error);
       }),
     );
+  }
+
+  private sanitizePayload(body: any): any {
+    if (!body || typeof body !== 'object') return body;
+    const copy = { ...body };
+    const sensitiveKeys = ['password', 'code', 'token', 'idToken', 'jwt', 'secret'];
+    for (const key of Object.keys(copy)) {
+      if (sensitiveKeys.some(s => key.toLowerCase().includes(s))) {
+        copy[key] = '***REDACTED***';
+      }
+    }
+    return copy;
   }
 }

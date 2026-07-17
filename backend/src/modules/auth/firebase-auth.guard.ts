@@ -20,6 +20,10 @@ export class FirebaseAuthGuard implements CanActivate {
     console.log(`[AUTH GUARD] canActivate triggered for request: ${request.method} ${request.url}`);
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      if (request.url && request.url.includes('/parking/ticket/')) {
+        console.log('[AUTH GUARD] Public ticket endpoint requested without token. Allowing access.');
+        return true;
+      }
       console.warn("[AUTH GUARD] Access denied: No Bearer token provided in Authorization header");
       throw new UnauthorizedException('No token provided');
     }

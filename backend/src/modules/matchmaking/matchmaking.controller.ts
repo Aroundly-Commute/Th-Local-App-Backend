@@ -39,13 +39,30 @@ export class MatchmakingController {
     return this.mm.updateRequestStatus(id, body.status, req.user.id);
   }
 
-  @Patch('requests/:id/start')
-  async startRideRequest(
+  @Patch('requests/:id/verify-otp')
+  async verifyOtpRequest(
     @Param('id') id: string,
     @Body() body: { otp: string },
     @Request() req: any,
   ) {
-    return this.mm.startRideRequest(id, body.otp, req.user.id);
+    return this.mm.verifyOtpRequest(id, body.otp, req.user.id);
+  }
+
+  @Patch('requests/:id/start-ride')
+  async startRideOnly(
+    @Param('id') id: string,
+    @Request() req: any,
+  ) {
+    return this.mm.startRideOnly(id, req.user.id);
+  }
+
+  @Patch('requests/:id/start')
+  async startRideRequest(
+    @Param('id') id: string,
+    @Body() body: { otp?: string },
+    @Request() req: any,
+  ) {
+    return this.mm.startRideRequest(id, body?.otp, req.user.id);
   }
 
   @Patch('requests/:id/complete')
