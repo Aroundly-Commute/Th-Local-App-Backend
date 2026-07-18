@@ -23,6 +23,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'User_corporateEmail_key'
   ) THEN
+    -- Drop the index if it exists to avoid relation collision when creating the constraint
+    DROP INDEX IF EXISTS "User_corporateEmail_key";
     ALTER TABLE "User" ADD CONSTRAINT "User_corporateEmail_key" UNIQUE ("corporateEmail");
   END IF;
 END $$;
@@ -58,6 +60,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'Review_fromUserId_toUserId_rideId_key'
   ) THEN
+    -- Drop the index if it exists to avoid relation collision when creating the constraint
+    DROP INDEX IF EXISTS "Review_fromUserId_toUserId_rideId_key";
     ALTER TABLE "Review" ADD CONSTRAINT "Review_fromUserId_toUserId_rideId_key" UNIQUE ("fromUserId", "toUserId", "rideId");
   END IF;
 END $$;
