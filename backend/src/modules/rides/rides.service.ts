@@ -1,9 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'crypto';
 import { Prisma, RideStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { lineStringWkt, pointWkt } from '../../common/utils/geo';
 import { PublishRideDto } from './dto/publish-ride.dto';
+import { CreateRecurringRideDto } from './dto/create-recurring-ride.dto';
 import { ChatService } from '../chat/chat.service';
 import { generateDeterministicId } from '../../common/utils/id';
 
@@ -255,8 +257,8 @@ export class RidesService {
         AND rr."status" = 'ACCEPTED'::"RideStatus"
     )`);
     
-    // Only list rides that have not passed their start time
-    conditions.push(Prisma.sql`r."startTime" >= NOW()`);
+    // Only list rides that have not passed their start time (expires on next calendar day in Asia/Kolkata timezone)
+    conditions.push(Prisma.sql`((r."startTime" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date + 1) AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC' > NOW()`);
 
     // Spatial filter check
     if (latitude !== undefined && longitude !== undefined) {
@@ -368,7 +370,25 @@ export class RidesService {
     if (!rows[0]) throw new NotFoundException('Ride not found');
     const ride = rows[0];
 
-    const isPastRide = ride.startTime < new Date();
+    const isPastRide = (() => {
+      const tzOffset = 5.5 * 60 * 60 * 1000;
+      const nowKolkata = new Date(Date.now() + tzOffset);
+      const rideKolkata = new Date(ride.startTime.getTime() + tzOffset);
+      
+      const nowYear = nowKolkata.getUTCFullYear();
+      const nowMonth = nowKolkata.getUTCMonth();
+      const nowDate = nowKolkata.getUTCDate();
+      
+      const rideYear = rideKolkata.getUTCFullYear();
+      const rideMonth = rideKolkata.getUTCMonth();
+      const rideDate = rideKolkata.getUTCDate();
+      
+      if (nowYear > rideYear) return true;
+      if (nowYear < rideYear) return false;
+      if (nowMonth > rideMonth) return true;
+      if (nowMonth < rideMonth) return false;
+      return nowDate > rideDate;
+    })();
     // Raw SQL so we can include rider geometry for map rendering
     const passengerRows = await (isPastRide
       ? this.prisma.$queryRaw<
@@ -641,7 +661,7 @@ export class RidesService {
           ],
           status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
         },
-        include: { ride: true }
+        include: { ride: true, requesterRide: true }
       });
 
       if (activeRequests.length > 0) {
@@ -657,8 +677,25 @@ export class RidesService {
         });
 
         for (const req of activeRequests) {
+          const linkedRideIds = [req.rideId, req.requesterRideId].filter((rid): rid is string => Boolean(rid));
+          if (linkedRideIds.length > 0) {
+            await this.prisma.ride.updateMany({
+              where: { id: { in: linkedRideIds } },
+              data: { status: RideStatus.CANCELLED }
+            }).catch(e => console.error('Failed to update linked rides status on setRideStatus CANCELLED:', e));
+          }
+
+          if (req.buddyRequestId) {
+            await this.prisma.buddyRequest.update({
+              where: { id: req.buddyRequestId },
+              data: { status: 'CANCELLED' }
+            }).catch(() => {});
+          }
+
           try {
-            const targetUser = req.riderId === ride.driverId ? (req.ride?.driverId || req.riderId) : req.riderId;
+            const targetUser = req.riderId === ride.driverId
+              ? (req.ride?.driverId && req.ride.driverId !== ride.driverId ? req.ride.driverId : req.riderId)
+              : req.riderId;
             await this.chatService.sendNotificationToUser(
               targetUser,
               'Ride Cancelled',
@@ -784,7 +821,26 @@ export class RidesService {
     // Populate upcoming and past strictly from the unified Ride table (where driverId = userId)
     driverRides.forEach(r => {
       const mapped = this.mapDriverRide(r, userId, reviewMap);
-      if (r.status === 'CANCELLED' || r.status === 'COMPLETED' || r.startTime < new Date()) {
+      const isPast = (() => {
+        const tzOffset = 5.5 * 60 * 60 * 1000;
+        const nowKolkata = new Date(Date.now() + tzOffset);
+        const rideKolkata = new Date(r.startTime.getTime() + tzOffset);
+        
+        const nowYear = nowKolkata.getUTCFullYear();
+        const nowMonth = nowKolkata.getUTCMonth();
+        const nowDate = nowKolkata.getUTCDate();
+        
+        const rideYear = rideKolkata.getUTCFullYear();
+        const rideMonth = rideKolkata.getUTCMonth();
+        const rideDate = rideKolkata.getUTCDate();
+        
+        if (nowYear > rideYear) return true;
+        if (nowYear < rideYear) return false;
+        if (nowMonth > rideMonth) return true;
+        if (nowMonth < rideMonth) return false;
+        return nowDate > rideDate;
+      })();
+      if (r.status === 'CANCELLED' || r.status === 'COMPLETED' || isPast) {
         past.push(mapped);
       } else {
         upcoming.push(mapped);
@@ -811,7 +867,26 @@ export class RidesService {
     riderRequests.forEach(rr => {
       const mapped = this.mapRiderRequest(rr, userId, reviewMap);
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
-      if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+      const isPastStartTime = (() => {
+        const tzOffset = 5.5 * 60 * 60 * 1000;
+        const nowKolkata = new Date(Date.now() + tzOffset);
+        const rideKolkata = new Date(rideStartTime.getTime() + tzOffset);
+        
+        const nowYear = nowKolkata.getUTCFullYear();
+        const nowMonth = nowKolkata.getUTCMonth();
+        const nowDate = nowKolkata.getUTCDate();
+        
+        const rideYear = rideKolkata.getUTCFullYear();
+        const rideMonth = rideKolkata.getUTCMonth();
+        const rideDate = rideKolkata.getUTCDate();
+        
+        if (nowYear > rideYear) return true;
+        if (nowYear < rideYear) return false;
+        if (nowMonth > rideMonth) return true;
+        if (nowMonth < rideMonth) return false;
+        return nowDate > rideDate;
+      })();
+      if (rr.status === 'REQUESTED' && !isPastStartTime && rr.ride.status !== 'CANCELLED') {
         if (rr.isInvitation === false) {
           requested.push({
             ...mapped,
@@ -835,7 +910,26 @@ export class RidesService {
         : this.mapRiderRequest(rr, userId, reviewMap);
 
       const rideStartTime = rr.riderStartTime || rr.ride.startTime;
-      if (rr.status === 'REQUESTED' && rideStartTime >= new Date() && rr.ride.status !== 'CANCELLED') {
+      const isPastStartTime = (() => {
+        const tzOffset = 5.5 * 60 * 60 * 1000;
+        const nowKolkata = new Date(Date.now() + tzOffset);
+        const rideKolkata = new Date(rideStartTime.getTime() + tzOffset);
+        
+        const nowYear = nowKolkata.getUTCFullYear();
+        const nowMonth = nowKolkata.getUTCMonth();
+        const nowDate = nowKolkata.getUTCDate();
+        
+        const rideYear = rideKolkata.getUTCFullYear();
+        const rideMonth = rideKolkata.getUTCMonth();
+        const rideDate = rideKolkata.getUTCDate();
+        
+        if (nowYear > rideYear) return true;
+        if (nowYear < rideYear) return false;
+        if (nowMonth > rideMonth) return true;
+        if (nowMonth < rideMonth) return false;
+        return nowDate > rideDate;
+      })();
+      if (rr.status === 'REQUESTED' && !isPastStartTime && rr.ride.status !== 'CANCELLED') {
         if (!requested.some(item => item.request_id === rr.id)) {
           requested.push({
             ...mapped,
@@ -1133,7 +1227,7 @@ export class RidesService {
             WHEN r."routeLine" IS NOT NULL THEN
               ST_Length(
                 ST_LineSubstring(
-                  r."routeLine"::geography,
+                  r."routeLine"::geometry,
                   LEAST(
                     ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
                     ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
@@ -1142,7 +1236,7 @@ export class RidesService {
                     ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
                     ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
                   )
-                )
+                )::geography
               )
             ELSE
               ST_Distance(
@@ -1420,5 +1514,168 @@ export class RidesService {
       can_enter_otp: otpRoleInfo.can_enter_otp,
       my_display_otp: otpRoleInfo.my_display_otp,
     };
+  }
+
+  async createRecurringSchedule(dto: CreateRecurringRideDto, driverId: string) {
+    const startWkt = pointWkt(dto.start);
+    const endWkt = pointWkt(dto.end);
+    const routeWkt = lineStringWkt(dto.route);
+
+    const userVehicle = await this.prisma.vehicle.findUnique({
+      where: { userId: driverId }
+    });
+
+    const vehicleType = dto.vehicleType || userVehicle?.type || 'CAR';
+    const vehicleCapacity = dto.vehicleCapacity || userVehicle?.capacity || 5;
+    const fuelType = dto.fuelType || userVehicle?.fuelType || 'Petrol';
+    const vehicleNumber = dto.vehicleNumber || userVehicle?.vehicleNumber || '';
+
+    const id = randomUUID();
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "RecurringRideSchedule" (
+        "id", "updatedAt", "driverId", "seatsAvailable", "chargeCents",
+        "daysOfWeek", "timeOfDay", "durationMinutes", "startDate", "endDate",
+        "startPlaceName", "endPlaceName", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
+        "startPoint", "endPoint", "routeLine"
+      ) VALUES (
+        ${id}, NOW(), ${driverId}, ${dto.seatsAvailable}, ${dto.chargeCents},
+        ${dto.daysOfWeek}, ${dto.timeOfDay}, ${dto.durationMinutes || 60}, ${new Date(dto.startDate)}, ${dto.endDate ? new Date(dto.endDate) : null},
+        ${dto.startPlaceName}, ${dto.endPlaceName}, ${vehicleType}, ${vehicleCapacity}, ${fuelType}, ${vehicleNumber},
+        ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
+        ST_SetSRID(ST_GeomFromText(${endWkt}), 4326),
+        ST_SetSRID(ST_GeomFromText(${routeWkt}), 4326)
+      )
+    `);
+
+    const result = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT 
+        "id", "driverId", "seatsAvailable", "chargeCents", "daysOfWeek", "timeOfDay", "durationMinutes", "startDate", "endDate",
+        "startPlaceName", "endPlaceName", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
+        ST_AsGeoJSON("startPoint") as "startPointGeoJson",
+        ST_AsGeoJSON("endPoint") as "endPointGeoJson",
+        ST_AsGeoJSON("routeLine") as "routeGeoJson"
+      FROM "RecurringRideSchedule"
+      WHERE id = ${id}
+    `);
+
+    return result[0];
+  }
+
+  async getRecurringSchedules(driverId: string) {
+    return this.prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT 
+        "id", "driverId", "seatsAvailable", "chargeCents", "daysOfWeek", "timeOfDay", "durationMinutes", "startDate", "endDate",
+        "startPlaceName", "endPlaceName", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
+        ST_AsGeoJSON("startPoint") as "startPointGeoJson",
+        ST_AsGeoJSON("endPoint") as "endPointGeoJson",
+        ST_AsGeoJSON("routeLine") as "routeGeoJson"
+      FROM "RecurringRideSchedule"
+      WHERE "driverId" = ${driverId}
+      ORDER BY "createdAt" DESC
+    `);
+  }
+
+  async deleteRecurringSchedule(id: string, driverId: string) {
+    const existing = await this.prisma.recurringRideSchedule.findFirst({
+      where: { id, driverId }
+    });
+    if (!existing) {
+      throw new NotFoundException('Recurring schedule not found or access denied');
+    }
+    return this.prisma.recurringRideSchedule.delete({
+      where: { id }
+    });
+  }
+
+  async materializeRecurringRides(daysAhead: number = 7) {
+    const schedules = await this.prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT 
+        "id", "driverId", "seatsAvailable", "chargeCents", "daysOfWeek", "timeOfDay", "durationMinutes", "startDate", "endDate",
+        "startPlaceName", "endPlaceName", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
+        ST_AsText("startPoint") as "startPointWkt",
+        ST_AsText("endPoint") as "endPointWkt",
+        ST_AsText("routeLine") as "routeLineWkt"
+      FROM "RecurringRideSchedule"
+    `);
+
+    const createdRides: string[] = [];
+    const now = new Date();
+
+    for (let i = 0; i < daysAhead; i++) {
+      const targetDate = new Date();
+      targetDate.setDate(now.getDate() + i);
+      const targetDayOfWeek = targetDate.getDay(); // 0-6
+
+      for (const schedule of schedules) {
+        // Check if schedule is active
+        const startDate = new Date(schedule.startDate);
+        const endDate = schedule.endDate ? new Date(schedule.endDate) : null;
+        if (targetDate < startDate || (endDate && targetDate > endDate)) {
+          continue;
+        }
+
+        // Check if daysOfWeek matches
+        if (!schedule.daysOfWeek.includes(targetDayOfWeek)) {
+          continue;
+        }
+
+        // Parse timeOfDay "HH:MM"
+        const [hoursStr, minutesStr] = schedule.timeOfDay.split(':');
+        const hours = parseInt(hoursStr, 10);
+        const minutes = parseInt(minutesStr, 10);
+
+        // Construct start and end times in local time (+05:30)
+        const year = targetDate.getFullYear();
+        const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+        const day = String(targetDate.getDate()).padStart(2, '0');
+        
+        const startTime = new Date(`${year}-${month}-${day}T${schedule.timeOfDay}:00+05:30`);
+        const endTime = new Date(startTime.getTime() + schedule.durationMinutes * 60 * 1000);
+
+        // Deterministic ID to avoid duplicates
+        const rideId = generateDeterministicId('ride', [
+          schedule.driverId,
+          schedule.startPlaceName,
+          schedule.endPlaceName,
+          startTime.toISOString()
+        ]);
+
+        // Check if ride already exists
+        const existingRide = await this.prisma.ride.findUnique({
+          where: { id: rideId }
+        });
+
+        if (!existingRide) {
+          await this.prisma.$executeRaw(Prisma.sql`
+            INSERT INTO "Ride" (
+              "id", "updatedAt", "driverId", "seatsAvailable", "chargeCents", "startTime", "endTime",
+              "startPlaceName", "endPlaceName", "status", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
+              "startPoint", "endPoint", "routeLine"
+            ) VALUES (
+              ${rideId}, NOW(), ${schedule.driverId}, ${schedule.seatsAvailable}, ${schedule.chargeCents}, ${startTime}, ${endTime},
+              ${schedule.startPlaceName}, ${schedule.endPlaceName}, 'OPEN'::"RideStatus", ${schedule.vehicleType}, ${schedule.vehicleCapacity}, ${schedule.fuelType}, ${schedule.vehicleNumber},
+              ST_SetSRID(ST_GeomFromText(${schedule.startPointWkt}), 4326),
+              ST_SetSRID(ST_GeomFromText(${schedule.endPointWkt}), 4326),
+              ST_SetSRID(ST_GeomFromText(${schedule.routeLineWkt}), 4326)
+            )
+          `);
+          createdRides.push(rideId);
+        }
+      }
+    }
+
+    return {
+      message: `Successfully materialized recurring rides for the next ${daysAhead} days.`,
+      createdCount: createdRides.length,
+      rideIds: createdRides
+    };
+  }
+
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async handleDailyRecurringRideCron() {
+    this.logger.log('Running nightly recurring ride materialization cron job...');
+    const result = await this.materializeRecurringRides(1);
+    this.logger.log(`Nightly cron finished: ${result.createdCount} rides materialized.`);
   }
 }
