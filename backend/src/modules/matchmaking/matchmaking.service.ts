@@ -378,7 +378,7 @@ export class MatchmakingService {
           WHEN r."routeLine" IS NOT NULL THEN
             ST_Length(
               ST_LineSubstring(
-                r."routeLine"::geography,
+                r."routeLine"::geometry,
                 LEAST(
                   ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
                   ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
@@ -387,7 +387,7 @@ export class MatchmakingService {
                   ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)),
                   ST_LineLocatePoint(r."routeLine"::geometry, ST_SetSRID(ST_GeomFromText(${endWkt}), 4326))
                 )
-              )
+              )::geography
             )
           ELSE
             ST_Distance(
@@ -789,32 +789,51 @@ export class MatchmakingService {
       }
     } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED) {
       if (req.status === RideStatus.ACCEPTED) {
-        if (req.rideId) {
-          const newSeatsAvailable = req.ride.seatsAvailable + req.seats;
-          const otherRequestedCount = await this.prisma.rideRequest.count({
-            where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
-          });
-          const rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
-
+        if (req.requesterRideId) {
           await this.prisma.ride.update({
-            where: { id: req.rideId },
-            data: {
-              seatsAvailable: newSeatsAvailable,
-              status: rideStatus
-            }
+            where: { id: req.requesterRideId },
+            data: { status: RideStatus.CANCELLED }
+          }).catch(err => {
+            console.error('Failed to update requester ride status on cancel:', err);
           });
+        }
+
+        if (req.rideId) {
+          const isSingleMatch = req.ride.role === 'SEEKING' || req.ride.vehicleType === 'CAB' || req.ride.seatsAvailable <= 0;
+          if (isSingleMatch || userId === req.ride.driverId) {
+            await this.prisma.ride.update({
+              where: { id: req.rideId },
+              data: { status: RideStatus.CANCELLED }
+            }).catch(err => {
+              console.error('Failed to update host ride status on cancel:', err);
+            });
+          } else {
+            const newSeatsAvailable = req.ride.seatsAvailable + req.seats;
+            const otherRequestedCount = await this.prisma.rideRequest.count({
+              where: { rideId: req.rideId, status: RideStatus.REQUESTED, id: { not: req.id } }
+            });
+            const rideStatus = otherRequestedCount > 0 ? RideStatus.REQUESTED : RideStatus.OPEN;
+
+            await this.prisma.ride.update({
+              where: { id: req.rideId },
+              data: {
+                seatsAvailable: newSeatsAvailable,
+                status: rideStatus
+              }
+            });
+          }
         }
 
         if (req.buddyRequestId) {
           await this.prisma.buddyRequest.update({
             where: { id: req.buddyRequestId },
-            data: { status: 'OPEN' }
+            data: { status: 'CANCELLED' }
           }).catch(err => {
-            console.error('Failed to revert associated buddy request status:', req.buddyRequestId, err);
+            console.error('Failed to update associated buddy request status:', req.buddyRequestId, err);
           });
         }
 
-        // Revert driver's buddy request (if it exists) using deterministic ID lookup
+        // Update driver's buddy request (if it exists) using deterministic ID lookup
         const driverBuddyRequestId = generateDeterministicId('buddy', [
           req.ride.driverId,
           req.ride.startPlaceName,
@@ -824,7 +843,7 @@ export class MatchmakingService {
         try {
           await this.prisma.buddyRequest.update({
             where: { id: driverBuddyRequestId },
-            data: { status: 'OPEN' }
+            data: { status: 'CANCELLED' }
           });
         } catch (e) {
           // Safe to ignore if it doesn't exist
@@ -885,46 +904,38 @@ export class MatchmakingService {
         peerUser: actorUser
       };
 
-      if (req.isInvitation) {
-        if (status === RideStatus.CANCELLED) {
-          this.gateway.notifyUser(req.riderId, 'ride_request_updated', richUpdatedReq);
-          await this.chatService.sendNotificationToUser(
-            req.riderId,
-            buddyRequest ? 'Cab Partner Request Cancelled' : 'Ride Invite Withdrawn',
-            buddyRequest ? `${actorUser?.name || 'A user'} has cancelled their request to book a cab with you.` : `${actorUser?.name || 'The driver'} has withdrawn their ride invite.`,
-            'ride_request_updated',
-            richUpdatedReq
-          );
-        } else {
-          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', richUpdatedReq);
-          await this.chatService.sendNotificationToUser(
-            req.ride.driverId,
-            buddyRequest ? `Cab Partner Request ${status}` : `Ride Invite ${status}`,
-            buddyRequest ? `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your cab booking request.` : `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your ride invitation.`,
-            'ride_request_updated',
-            richUpdatedReq
-          );
-        }
+      const otherUserId = userId === req.riderId ? req.ride.driverId : req.riderId;
+
+      if (status === RideStatus.CANCELLED || status === RideStatus.WITHDRAWN) {
+        this.gateway.notifyUser(otherUserId, 'ride_cancelled', richUpdatedReq);
+        this.gateway.notifyUser(otherUserId, 'ride_request_updated', richUpdatedReq);
+        await this.chatService.sendNotificationToUser(
+          otherUserId,
+          userId === req.riderId ? 'Booking Cancelled' : 'Ride Booking Cancelled',
+          userId === req.riderId
+            ? `${actorUser?.name || 'A rider'} has cancelled their booking for your ride.`
+            : `${actorUser?.name || 'The driver'} has cancelled your ride booking.`,
+          'ride_request_updated',
+          richUpdatedReq
+        );
+      } else if (req.isInvitation) {
+        this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', richUpdatedReq);
+        await this.chatService.sendNotificationToUser(
+          req.ride.driverId,
+          buddyRequest ? `Cab Partner Request ${status}` : `Ride Invite ${status}`,
+          buddyRequest ? `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your cab booking request.` : `${actorUser?.name || 'The passenger'} has ${status.toLowerCase()} your ride invitation.`,
+          'ride_request_updated',
+          richUpdatedReq
+        );
       } else {
-        if (status === RideStatus.CANCELLED) {
-          this.gateway.notifyUser(req.ride.driverId, 'ride_request_updated', richUpdatedReq);
-          await this.chatService.sendNotificationToUser(
-            req.ride.driverId,
-            'Booking Cancelled',
-            `${actorUser?.name || 'A rider'} has cancelled their booking for your ride.`,
-            'ride_request_updated',
-            richUpdatedReq
-          );
-        } else {
-          this.gateway.notifyUser(req.riderId, 'ride_request_updated', richUpdatedReq);
-          await this.chatService.sendNotificationToUser(
-            req.riderId,
-            `Ride Request ${status}`,
-            `Your ride request has been ${status.toLowerCase()} by ${actorUser?.name || 'the driver'}.`,
-            'ride_request_updated',
-            richUpdatedReq
-          );
-        }
+        this.gateway.notifyUser(req.riderId, 'ride_request_updated', richUpdatedReq);
+        await this.chatService.sendNotificationToUser(
+          req.riderId,
+          `Ride Request ${status}`,
+          `Your ride request has been ${status.toLowerCase()} by ${actorUser?.name || 'the driver'}.`,
+          'ride_request_updated',
+          richUpdatedReq
+        );
       }
     } catch (e) {
       console.error('Failed to send status update notification:', e);
@@ -954,10 +965,39 @@ export class MatchmakingService {
           data: { status: RideStatus.CANCELLED }
         });
 
+        const activeRequests = await this.prisma.rideRequest.findMany({
+          where: {
+            OR: [
+              { rideId: cabRideId },
+              { buddyRequestId: id }
+            ],
+            status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
+          },
+          include: { ride: true, requesterRide: true }
+        });
+
+        for (const rreq of activeRequests) {
+          const linkedRideIds = [rreq.rideId, rreq.requesterRideId].filter((rid): rid is string => Boolean(rid));
+          if (linkedRideIds.length > 0) {
+            await this.prisma.ride.updateMany({
+              where: { id: { in: linkedRideIds } },
+              data: { status: RideStatus.CANCELLED }
+            });
+          }
+          const targetUserId = rreq.riderId === userId ? (rreq.ride?.driverId && rreq.ride.driverId !== userId ? rreq.ride.driverId : rreq.riderId) : rreq.riderId;
+          if (targetUserId) {
+            this.gateway.notifyUser(targetUserId, 'ride_cancelled', { ...rreq, status: RideStatus.CANCELLED });
+            this.gateway.notifyUser(targetUserId, 'ride_request_updated', { ...rreq, status: RideStatus.CANCELLED });
+          }
+        }
+
         // Cancel all active requests for that CAB ride
         await this.prisma.rideRequest.updateMany({
           where: {
-            rideId: cabRideId,
+            OR: [
+              { rideId: cabRideId },
+              { buddyRequestId: id }
+            ],
             status: { in: [RideStatus.REQUESTED, RideStatus.ACCEPTED] }
           },
           data: { status: RideStatus.CANCELLED }
@@ -1355,7 +1395,7 @@ export class MatchmakingService {
           WHEN r."routeLine" IS NOT NULL THEN
             ST_Length(
               ST_LineSubstring(
-                r."routeLine"::geography,
+                r."routeLine"::geometry,
                 LEAST(
                   ST_LineLocatePoint(r."routeLine"::geometry, br."startPoint"),
                   ST_LineLocatePoint(r."routeLine"::geometry, br."endPoint")
@@ -1364,7 +1404,7 @@ export class MatchmakingService {
                   ST_LineLocatePoint(r."routeLine"::geometry, br."startPoint"),
                   ST_LineLocatePoint(r."routeLine"::geometry, br."endPoint")
                 )
-              )
+              )::geography
             )
           ELSE
             ST_Distance(
@@ -1627,7 +1667,7 @@ export class MatchmakingService {
           },
           include: {
             rider: {
-              select: { id: true, name: true, profilePic: true }
+              select: { id: true, name: true, profilePic: true, rating: true }
             },
             ride: {
               select: {
@@ -1637,7 +1677,7 @@ export class MatchmakingService {
                 startTime: true,
                 vehicleType: true,
                 driver: {
-                  select: { id: true, name: true, profilePic: true }
+                  select: { id: true, name: true, profilePic: true, rating: true }
                 }
               }
             }
@@ -1663,7 +1703,7 @@ export class MatchmakingService {
         },
         include: {
           rider: {
-            select: { id: true, name: true, profilePic: true }
+            select: { id: true, name: true, profilePic: true, rating: true }
           },
           ride: {
             select: {
@@ -1673,7 +1713,7 @@ export class MatchmakingService {
               startTime: true,
               vehicleType: true,
               driver: {
-                select: { id: true, name: true, profilePic: true }
+                select: { id: true, name: true, profilePic: true, rating: true }
               }
             }
           }
@@ -1689,13 +1729,23 @@ export class MatchmakingService {
     }
 
     try {
-      this.gateway.notifyUser(buddyRequest.riderId, 'new_buddy_request', newRequest);
+      const richBuddyPayload = {
+        ...newRequest,
+        peerRole: 'CAB_BUDDY',
+        peerUser: {
+          id: newRequest.rider?.id,
+          name: newRequest.rider?.name,
+          profilePic: newRequest.rider?.profilePic,
+          rating: newRequest.rider?.rating,
+        }
+      };
+      this.gateway.notifyUser(buddyRequest.riderId, 'new_buddy_request', richBuddyPayload);
       await this.chatService.sendNotificationToUser(
         buddyRequest.riderId,
         'New Cab Buddy Request',
         `A user wants to book a cab with you.`,
         'new_buddy_request',
-        newRequest
+        richBuddyPayload
       );
     } catch (e) {
       console.error('Failed to notify buddy:', buddyRequest.riderId, e);
