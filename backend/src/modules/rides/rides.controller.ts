@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards, Request } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, Request } from '@nestjs/common';
 import { PublishRideDto } from './dto/publish-ride.dto';
+import { CreateRecurringRideDto } from './dto/create-recurring-ride.dto';
 import { RidesService } from './rides.service';
 import { RideStatus } from '@prisma/client';
 import { FirebaseAuthGuard } from '../auth/firebase-auth.guard';
@@ -61,5 +62,32 @@ export class RidesController {
   @Post(':id/book')
   async bookRide(@Param('id') id: string, @Body() body: any, @Request() req: any) {
     return this.rides.bookRide(id, req.user.id, body);
+  }
+
+  @Post('recurring')
+  async createRecurringSchedule(@Request() req: any, @Body() dto: CreateRecurringRideDto) {
+    return this.rides.createRecurringSchedule(dto, req.user.id);
+  }
+
+  @Get('recurring')
+  async getRecurringSchedules(@Request() req: any) {
+    return this.rides.getRecurringSchedules(req.user.id);
+  }
+
+  @Delete('recurring/:id')
+  async deleteRecurringSchedule(@Request() req: any, @Param('id') id: string) {
+    return this.rides.deleteRecurringSchedule(id, req.user.id);
+  }
+
+  @Get('recurring/materialize')
+  async materializeRecurringRidesGet(@Query('days') days?: string) {
+    const daysNum = days ? parseInt(days, 10) : undefined;
+    return this.rides.materializeRecurringRides(daysNum);
+  }
+
+  @Post('recurring/materialize')
+  async materializeRecurringRidesPost(@Query('days') days?: string) {
+    const daysNum = days ? parseInt(days, 10) : undefined;
+    return this.rides.materializeRecurringRides(daysNum);
   }
 }
