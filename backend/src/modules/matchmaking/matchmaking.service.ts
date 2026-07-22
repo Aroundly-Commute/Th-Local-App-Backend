@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import { Prisma, RideStatus } from '@prisma/client';
@@ -13,6 +13,8 @@ import { MatchmakingGateway } from './matchmaking.gateway';
 
 @Injectable()
 export class MatchmakingService {
+  private readonly logger = new Logger(MatchmakingService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly gateway: MatchmakingGateway,
@@ -20,6 +22,7 @@ export class MatchmakingService {
   ) {}
 
   async search(dto: SearchMatchesDto, userId: string) {
+    const searchStartTime = Date.now();
     const riderStartTime = new Date(dto.startTime);
     if (isNaN(riderStartTime.valueOf())) throw new BadRequestException('Invalid startTime');
 
@@ -297,6 +300,11 @@ export class MatchmakingService {
       sections.push(buddiesSection);
       sections.push(carpoolsSection);
     }
+
+    this.logger.log(
+      `[MATCHMAKING SEARCH] Completed for user ${userId} in +${Date.now() - searchStartTime}ms ` +
+      `(Offered: ${offeredRides.length}, Buddies: ${buddiesMatches.length}, Carpools: ${carpoolsMatches.length})`
+    );
 
     return {
       query: {
@@ -617,7 +625,7 @@ export class MatchmakingService {
 
   async updateRequestStatus(requestId: string, status: RideStatus, userId: string) {
     if (!(status === RideStatus.ACCEPTED || status === RideStatus.REJECTED || status === RideStatus.CANCELLED || status === RideStatus.WITHDRAWN)) {
-      throw new BadRequestException('Only ACCEPTED, REJECTED or CANCELLED are allowed here');
+      throw new BadRequestException('Only ACCEPTED, REJECTED, CANCELLED or WITHDRAWN are allowed here');
     }
 
     const req = await this.prisma.rideRequest.findUnique({
@@ -787,7 +795,7 @@ export class MatchmakingService {
           data: { status: 'CANCELLED' }
         });
       }
-    } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED) {
+    } else if (status === RideStatus.CANCELLED || status === RideStatus.REJECTED || status === RideStatus.WITHDRAWN) {
       if (req.status === RideStatus.ACCEPTED) {
         if (req.requesterRideId) {
           await this.prisma.ride.update({
@@ -956,7 +964,7 @@ export class MatchmakingService {
       data: { status }
     });
 
-    if (status === 'CANCELLED') {
+    if (status === 'CANCELLED' || status === 'WITHDRAWN') {
       // Derive the corresponding CAB Ride ID deterministically
       const cabRideId = generateDeterministicId('ride', [userId, req.startPlaceName, req.endPlaceName, req.startTime.toISOString()]);
       try {
@@ -1178,7 +1186,7 @@ export class MatchmakingService {
     limit?: number,
     latitude?: number,
     longitude?: number,
-    radius: number = 3000,
+    radius: number = 50000,
   ) {
     const offset = page && page > 1 && limit ? (page - 1) * limit : 0;
     const take = limit && limit > 0 ? limit : 200;
@@ -1188,7 +1196,7 @@ export class MatchmakingService {
       Prisma.sql`r."driverId" != ${userId}`,
       Prisma.sql`r."role" = 'SEEKING'`,
       Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`,
-      Prisma.sql`r."startTime" >= NOW()`,
+      Prisma.sql`((r."startTime" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date + 1) AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC' > NOW()`,
       // Exclude seeking rides for which THIS specific user has a pending or accepted request (sent OR received)
       Prisma.sql`NOT EXISTS (
         SELECT 1 FROM "RideRequest" rr
