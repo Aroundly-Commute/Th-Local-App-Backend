@@ -22,19 +22,21 @@ export class LoggingInterceptor implements NestInterceptor {
     const sanitizedBody = this.sanitizePayload(body);
     const bodyStr = sanitizedBody && Object.keys(sanitizedBody).length > 0 ? ` - Body: ${JSON.stringify(sanitizedBody)}` : '';
 
-    this.logger.log(`[REQ] ${method} ${url} (User: ${userId})${bodyStr}`);
+    const isoTime = new Date().toISOString();
+    this.logger.log(`[${isoTime}] [REQ] ${method} ${url} (User: ${userId})${bodyStr}`);
 
     return next.handle().pipe(
       tap((response) => {
         const delay = Date.now() - now;
         const statusCode = context.switchToHttp().getResponse().statusCode || 200;
-        this.logger.log(`[RES] ${method} ${url} Status: ${statusCode} +${delay}ms (User: ${userId})`);
+        const slowTag = delay > 800 ? ` ⚠️ [SLOW API >800ms]` : '';
+        this.logger.log(`[${new Date().toISOString()}] [RES] ${method} ${url} Status: ${statusCode} +${delay}ms${slowTag} (User: ${userId})`);
       }),
       catchError((error) => {
         const delay = Date.now() - now;
         const status = error.status || 500;
         this.logger.error(
-          `[ERR] ${method} ${url} Status: ${status} +${delay}ms (User: ${userId}) - ${error.message}`,
+          `[${new Date().toISOString()}] [ERR] ${method} ${url} Status: ${status} +${delay}ms (User: ${userId}) - ${error.message}`,
         );
         return throwError(() => error);
       }),

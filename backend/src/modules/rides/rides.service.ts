@@ -219,7 +219,7 @@ export class RidesService {
     limit?: number,
     latitude?: number,
     longitude?: number,
-    radius: number = 3000,
+    radius: number = 50000,
   ) {
     const conditions: Prisma.Sql[] = [];
     if (status) {
@@ -623,11 +623,16 @@ export class RidesService {
     };
   }
 
-  async setRideStatus(id: string, status: RideStatus) {
+  async setRideStatus(id: string, status: RideStatus, userId?: string) {
+    const startTime = Date.now();
     const ride = await this.prisma.ride.findUnique({
       where: { id }
     });
     if (!ride) throw new NotFoundException('Ride not found');
+
+    if (userId && ride.driverId !== userId) {
+      this.logger.warn(`User ${userId} attempted to set status of ride ${id} owned by ${ride.driverId}`);
+    }
 
     const updated = await this.prisma.ride.update({
       where: { id },
@@ -635,7 +640,9 @@ export class RidesService {
       select: { id: true, status: true, updatedAt: true },
     });
 
-    if (status === RideStatus.CANCELLED) {
+    this.logger.log(`[RIDE STATUS] Ride ${id} status changed from ${ride.status} to ${status} by user ${userId || 'system'} (+${Date.now() - startTime}ms)`);
+
+    if (status === RideStatus.CANCELLED || status === RideStatus.WITHDRAWN) {
       // Also cancel the driver's own BuddyRequest in this time window
       const driverBuddyRequestId = generateDeterministicId('buddy', [
         ride.driverId,
@@ -1574,6 +1581,42 @@ export class RidesService {
       WHERE "driverId" = ${driverId}
       ORDER BY "createdAt" DESC
     `);
+  }
+
+  async updateRecurringSchedule(id: string, driverId: string, updates: { daysOfWeek?: number[]; timeOfDay?: string; seatsAvailable?: number; chargeCents?: number; isActive?: boolean }) {
+    const existing = await this.prisma.recurringRideSchedule.findFirst({
+      where: { id, driverId }
+    });
+    if (!existing) {
+      throw new NotFoundException('Recurring schedule not found or access denied');
+    }
+
+    const dataToUpdate: any = {};
+    if (updates.daysOfWeek) dataToUpdate.daysOfWeek = updates.daysOfWeek;
+    if (updates.timeOfDay) dataToUpdate.timeOfDay = updates.timeOfDay;
+    if (updates.seatsAvailable !== undefined) dataToUpdate.seatsAvailable = updates.seatsAvailable;
+    if (updates.chargeCents !== undefined) dataToUpdate.chargeCents = updates.chargeCents;
+
+    if (updates.isActive !== undefined) {
+      if (updates.isActive) {
+        dataToUpdate.endDate = null;
+      } else {
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        dataToUpdate.endDate = yesterday;
+      }
+    }
+
+    const updated = await this.prisma.recurringRideSchedule.update({
+      where: { id },
+      data: dataToUpdate
+    });
+
+    if (updates.isActive) {
+      await this.materializeRecurringRides(1).catch(() => {});
+    }
+
+    return updated;
   }
 
   async deleteRecurringSchedule(id: string, driverId: string) {
