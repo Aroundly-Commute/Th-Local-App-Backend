@@ -133,19 +133,48 @@ export class ChatService {
     }));
   }
 
-  async sendFcmPush(token: string, title: string, body: string, data?: Record<string, string>) {
+  async sendFcmPush(token: string, title: string, body: string, data?: Record<string, string>, imageUrl?: string) {
     try {
       if (!token) return;
       console.log(`[FCM] Sending push notification to token: ${token}`);
+      
+      const payloadData: Record<string, string> = {};
+      if (data) {
+        for (const [k, v] of Object.entries(data)) {
+          payloadData[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        }
+      }
+
+      const notifType = payloadData.type || 'general';
+      const isChat = notifType === 'chat_message' || notifType === 'new_chat_message';
+      const isRequest = notifType.includes('request') || notifType.includes('invite');
+
       await admin.messaging().send({
         token,
-        notification: { title, body },
-        data: data || {},
+        notification: {
+          title,
+          body,
+          ...(imageUrl ? { imageUrl } : {}),
+        },
+        data: payloadData,
         android: {
           priority: 'high',
           notification: {
             sound: 'default',
-            channelId: 'default_channel_id'
+            channelId: 'default_channel_id',
+            ...(imageUrl ? { imageUrl } : {}),
+          }
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+              category: isChat ? 'CHAT_MESSAGE' : isRequest ? 'RIDE_REQUEST' : 'GENERAL',
+            }
+          },
+          fcmOptions: {
+            ...(imageUrl ? { imageUrl } : {}),
           }
         }
       });
@@ -174,8 +203,8 @@ export class ChatService {
     const recipientId = await this.getRecipientId(chatId, senderId);
 
     let resolvedStatus = 'SENT';
+    const isRecipientInChat = recipientId ? this.chatClients.get(chatId)?.some(c => c.userId === recipientId) : false;
     if (recipientId) {
-      const isRecipientInChat = this.chatClients.get(chatId)?.some(c => c.userId === recipientId);
       if (isRecipientInChat) {
         resolvedStatus = 'READ';
       } else {
@@ -201,6 +230,7 @@ export class ChatService {
       chat_id: msg.chatId,
       sender_id: msg.senderId,
       sender_name: msg.sender.name,
+      sender_avatar: msg.sender.profilePic || null,
       text: msg.text,
       status: msg.status,
       created_at: msg.createdAt.toISOString()
@@ -214,7 +244,7 @@ export class ChatService {
         // In-app real-time notification
         this.notifyUserWs(recipientId, 'new_chat_message', responseData);
       } else if (resolvedStatus === 'SENT') {
-        // Offline notification queueing & Firebase push
+        // Offline notification queueing
         await this.prisma.pendingNotification.create({
           data: {
             userId: recipientId,
@@ -222,9 +252,14 @@ export class ChatService {
             payload: JSON.stringify(responseData)
           }
         });
+      }
 
+      // Always dispatch FCM Push Notification to recipient if not actively looking at this chat room
+      // (ensures background notification panel gets notified)
+      if (!isRecipientInChat) {
         const recipient = await this.prisma.user.findUnique({
-          where: { id: recipientId }
+          where: { id: recipientId },
+          select: { fcmToken: true }
         });
         if (recipient?.fcmToken) {
           await this.sendFcmPush(
@@ -234,8 +269,11 @@ export class ChatService {
             {
               chatId,
               senderId,
+              senderName: msg.sender.name,
+              senderAvatar: msg.sender.profilePic || '',
               type: 'chat_message'
-            }
+            },
+            msg.sender.profilePic || undefined
           );
         }
       }
@@ -336,10 +374,24 @@ export class ChatService {
         select: { fcmToken: true }
       });
       if (user?.fcmToken) {
-        await this.sendFcmPush(user.fcmToken, title, body, {
+        const payloadObj = typeof payloadData === 'string' ? JSON.parse(payloadData) : payloadData;
+        const senderName = payloadObj?.peerUser?.name || payloadObj?.requesterName || payloadObj?.userName || payloadObj?.rider_name || payloadObj?.driver_name || '';
+        const senderAvatar = payloadObj?.peerUser?.avatarUrl || payloadObj?.peerUser?.profilePic || payloadObj?.avatarUrl || payloadObj?.profilePic || payloadObj?.requesterAvatar || '';
+        const rideId = payloadObj?.rideId || payloadObj?.ride_id || '';
+        const requestId = payloadObj?.id || payloadObj?.requestId || '';
+        const chatId = payloadObj?.chatId || payloadObj?.chat_id || '';
+
+        const dataParams: Record<string, string> = {
           type,
+          senderName: String(senderName),
+          senderAvatar: String(senderAvatar),
+          rideId: String(rideId),
+          requestId: String(requestId),
+          chatId: String(chatId),
           payload: typeof payloadData === 'string' ? payloadData : JSON.stringify(payloadData)
-        });
+        };
+
+        await this.sendFcmPush(user.fcmToken, title, body, dataParams, senderAvatar || undefined);
       }
     } catch (e: any) {
       console.error(`[NOTIFICATION] Error sending FCM push to user ${userId}:`, e?.message || e);

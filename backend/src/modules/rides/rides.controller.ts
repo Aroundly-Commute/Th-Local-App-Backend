@@ -55,8 +55,8 @@ export class RidesController {
   }
 
   @Patch(':id/status')
-  async setStatus(@Param('id') id: string, @Body() body: { status: RideStatus }) {
-    return this.rides.setRideStatus(id, body.status);
+  async setStatus(@Param('id') id: string, @Body() body: { status: RideStatus }, @Request() req: any) {
+    return this.rides.setRideStatus(id, body.status, req.user.id);
   }
 
   @Post(':id/book')
@@ -72,6 +72,15 @@ export class RidesController {
   @Get('recurring')
   async getRecurringSchedules(@Request() req: any) {
     return this.rides.getRecurringSchedules(req.user.id);
+  }
+
+  @Patch('recurring/:id')
+  async updateRecurringSchedule(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Body() body: { daysOfWeek?: number[]; timeOfDay?: string; seatsAvailable?: number; chargeCents?: number; isActive?: boolean }
+  ) {
+    return this.rides.updateRecurringSchedule(id, req.user.id, body);
   }
 
   @Delete('recurring/:id')
