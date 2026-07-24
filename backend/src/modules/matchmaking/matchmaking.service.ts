@@ -487,8 +487,14 @@ export class MatchmakingService {
             updatedAt: now
           }
         });
+        if (riderRideId) {
+          await this.prisma.ride.update({
+            where: { id: riderRideId },
+            data: { status: RideStatus.REQUESTED }
+          }).catch(() => {});
+        }
         const rows = await this.prisma.$queryRaw<any[]>(Prisma.sql`
-          SELECT "id", "rideId", "riderId" as "riderName", "riderStartName", "riderEndName", "riderStartTime", "status", "seats", "fareCents"
+          SELECT "id", "rideId", "riderId", "riderStartName", "riderEndName", "riderStartTime", "status", "seats", "fareCents"
           FROM "RideRequest"
           WHERE id = ${id}
         `);
@@ -631,11 +637,51 @@ export class MatchmakingService {
       throw new BadRequestException('Only ACCEPTED, REJECTED, CANCELLED or WITHDRAWN are allowed here');
     }
 
-    const req = await this.prisma.rideRequest.findUnique({
+    let req = await this.prisma.rideRequest.findUnique({
       where: { id: requestId },
       include: { ride: true }
     });
-    if (!req) throw new NotFoundException('Request not found');
+
+    if (!req) {
+      const fallbackReq = await this.prisma.rideRequest.findFirst({
+        where: {
+          OR: [
+            { rideId: requestId, riderId: userId },
+            { requesterRideId: requestId, riderId: userId },
+            { rideId: requestId, ride: { driverId: userId } },
+            { requesterRideId: requestId },
+            { rideId: requestId }
+          ]
+        },
+        include: { ride: true },
+        orderBy: { updatedAt: 'desc' }
+      });
+      if (fallbackReq) {
+        req = fallbackReq;
+        requestId = fallbackReq.id;
+      }
+    }
+
+    if (!req) {
+      // Fallback 2: Direct Ride cancellation by driver or passenger owner
+      const rideToCancel = await this.prisma.ride.findUnique({ where: { id: requestId } });
+      if (rideToCancel && (status === RideStatus.CANCELLED || status === RideStatus.WITHDRAWN)) {
+        if (rideToCancel.driverId !== userId) {
+          throw new BadRequestException('Not authorized to cancel this ride');
+        }
+        await this.prisma.ride.update({
+          where: { id: requestId },
+          data: { status: RideStatus.CANCELLED }
+        });
+        // Also cancel any associated requests
+        await this.prisma.rideRequest.updateMany({
+          where: { OR: [{ rideId: requestId }, { requesterRideId: requestId }] },
+          data: { status: RideStatus.CANCELLED }
+        });
+        return { id: requestId, status: RideStatus.CANCELLED, message: 'Ride cancelled successfully' };
+      }
+      throw new NotFoundException('Request not found');
+    }
 
     const buddyRequest = req.buddyRequestId ? await this.prisma.buddyRequest.findUnique({
       where: { id: req.buddyRequestId },

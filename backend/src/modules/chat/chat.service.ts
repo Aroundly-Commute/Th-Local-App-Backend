@@ -148,13 +148,14 @@ export class ChatService {
       const notifType = payloadData.type || 'general';
       const isChat = notifType === 'chat_message' || notifType === 'new_chat_message';
       const isRequest = notifType.includes('request') || notifType.includes('invite');
+      const attachImage = isChat ? imageUrl : undefined;
 
       await admin.messaging().send({
         token,
         notification: {
           title,
           body,
-          ...(imageUrl ? { imageUrl } : {}),
+          ...(attachImage ? { imageUrl: attachImage } : {}),
         },
         data: payloadData,
         android: {
@@ -162,7 +163,7 @@ export class ChatService {
           notification: {
             sound: 'default',
             channelId: 'default_channel_id',
-            ...(imageUrl ? { imageUrl } : {}),
+            ...(attachImage ? { imageUrl: attachImage } : {}),
           }
         },
         apns: {
@@ -174,7 +175,7 @@ export class ChatService {
             }
           },
           fcmOptions: {
-            ...(imageUrl ? { imageUrl } : {}),
+            ...(attachImage ? { imageUrl: attachImage } : {}),
           }
         }
       });
