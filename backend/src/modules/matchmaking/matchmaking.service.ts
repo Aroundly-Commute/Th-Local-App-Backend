@@ -137,6 +137,7 @@ export class MatchmakingService {
             AND rr."status" IN ('REQUESTED'::"RideStatus", 'ACCEPTED'::"RideStatus")
         )
         AND r."seatsAvailable" >= ${seats}
+        AND r."startTime" >= (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
         AND DATE((r."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(rider.rider_start_time AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."routeLine"::geography, rider.rider_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."routeLine"::geography, rider.rider_end_g, ${endRadiusMeters})
@@ -203,6 +204,7 @@ export class MatchmakingService {
             AND (rr."riderId" = ${userId} OR rr."rideId" IN (SELECT id FROM "Ride" WHERE "driverId" = ${userId}))
         )
         AND DATE((r."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND r."startTime" >= (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
       ORDER BY "timeDiff" ASC
@@ -261,6 +263,7 @@ export class MatchmakingService {
             AND (rr."riderId" = ${userId} OR rr."rideId" IN (SELECT id FROM "Ride" WHERE "driverId" = ${userId}))
         )
         AND DATE((r."startTime" AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = DATE(search.search_start_time AT TIME ZONE 'Asia/Kolkata')
+        AND r."startTime" >= (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
         AND ST_DWithin(r."startPoint"::geography, search.search_start_g, ${startRadiusMeters})
         AND ST_DWithin(r."endPoint"::geography, search.search_end_g, ${endRadiusMeters})
       ORDER BY "timeDiff" ASC
@@ -1196,7 +1199,7 @@ export class MatchmakingService {
       Prisma.sql`r."driverId" != ${userId}`,
       Prisma.sql`r."role" = 'SEEKING'`,
       Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`,
-      Prisma.sql`r."startTime" >= ((NOW() AT TIME ZONE 'Asia/Kolkata')::date AT TIME ZONE 'Asia/Kolkata')`,
+      Prisma.sql`r."startTime" >= (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')`,
       // Exclude seeking rides for which THIS specific user has a pending or accepted request (sent OR received)
       Prisma.sql`NOT EXISTS (
         SELECT 1 FROM "RideRequest" rr
@@ -1219,7 +1222,7 @@ export class MatchmakingService {
 
     if (hasCoords) {
       const startWkt = `POINT(${longitude} ${latitude})`;
-      conditions.push(Prisma.sql`ST_DWithin(r."startPoint"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`);
+      conditions.push(Prisma.sql`ST_DWithin(COALESCE(r."routeLine", r."startPoint")::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`);
     }
 
     const where = Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}`;
