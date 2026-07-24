@@ -219,7 +219,7 @@ export class RidesService {
     limit?: number,
     latitude?: number,
     longitude?: number,
-    radius: number = 3000,
+    radius: number = 10000,
   ) {
     const conditions: Prisma.Sql[] = [];
     if (status) {
@@ -228,8 +228,7 @@ export class RidesService {
       conditions.push(Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`);
     }
 
-    // Only show carpool rides (CAR) offered by others in Rides Near You.
-    conditions.push(Prisma.sql`r."vehicleType" = 'CAR'`);
+    // Show all offered rides by others in Rides Near You.
     conditions.push(Prisma.sql`r."role" = 'OFFERED'`);
 
     if (driverId) conditions.push(Prisma.sql`r."driverId" = ${driverId}`);
@@ -258,12 +257,12 @@ export class RidesService {
     )`);
     
     // Only list rides that have not expired (start time date in Asia/Kolkata is today or in the future)
-    conditions.push(Prisma.sql`r."startTime" >= ((NOW() AT TIME ZONE 'Asia/Kolkata')::date AT TIME ZONE 'Asia/Kolkata')`);
+    conditions.push(Prisma.sql`r."startTime" >= (date_trunc('day', NOW() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')`);
 
-    // Spatial filter check
+    // Spatial filter check: check route line or start point proximity
     if (latitude !== undefined && longitude !== undefined) {
       const startWkt = `POINT(${longitude} ${latitude})`;
-      conditions.push(Prisma.sql`ST_DWithin(r."startPoint"::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`);
+      conditions.push(Prisma.sql`ST_DWithin(COALESCE(r."routeLine", r."startPoint")::geography, ST_SetSRID(ST_GeomFromText(${startWkt}), 4326)::geography, ${radius})`);
     }
 
     const where = conditions.length > 0 ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
