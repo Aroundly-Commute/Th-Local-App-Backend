@@ -1186,7 +1186,7 @@ export class MatchmakingService {
     limit?: number,
     latitude?: number,
     longitude?: number,
-    radius: number = 50000,
+    radius: number = 3000,
   ) {
     const offset = page && page > 1 && limit ? (page - 1) * limit : 0;
     const take = limit && limit > 0 ? limit : 200;
@@ -1196,7 +1196,7 @@ export class MatchmakingService {
       Prisma.sql`r."driverId" != ${userId}`,
       Prisma.sql`r."role" = 'SEEKING'`,
       Prisma.sql`r."status" IN ('OPEN'::"RideStatus", 'REQUESTED'::"RideStatus")`,
-      Prisma.sql`((r."startTime" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date + 1) AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC' > NOW()`,
+      Prisma.sql`r."startTime" >= ((NOW() AT TIME ZONE 'Asia/Kolkata')::date AT TIME ZONE 'Asia/Kolkata')`,
       // Exclude seeking rides for which THIS specific user has a pending or accepted request (sent OR received)
       Prisma.sql`NOT EXISTS (
         SELECT 1 FROM "RideRequest" rr

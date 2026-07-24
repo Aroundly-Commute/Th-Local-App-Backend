@@ -219,7 +219,7 @@ export class RidesService {
     limit?: number,
     latitude?: number,
     longitude?: number,
-    radius: number = 50000,
+    radius: number = 3000,
   ) {
     const conditions: Prisma.Sql[] = [];
     if (status) {
@@ -257,8 +257,8 @@ export class RidesService {
         AND rr."status" = 'ACCEPTED'::"RideStatus"
     )`);
     
-    // Only list rides that have not passed their start time (expires on next calendar day in Asia/Kolkata timezone)
-    conditions.push(Prisma.sql`((r."startTime" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date + 1) AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC' > NOW()`);
+    // Only list rides that have not expired (start time date in Asia/Kolkata is today or in the future)
+    conditions.push(Prisma.sql`r."startTime" >= ((NOW() AT TIME ZONE 'Asia/Kolkata')::date AT TIME ZONE 'Asia/Kolkata')`);
 
     // Spatial filter check
     if (latitude !== undefined && longitude !== undefined) {
@@ -1566,6 +1566,9 @@ export class RidesService {
       WHERE id = ${id}
     `);
 
+    // Immediately materialize upcoming rides for the next 7 days
+    await this.materializeRecurringRides(7).catch(() => {});
+
     return result[0];
   }
 
@@ -1613,7 +1616,7 @@ export class RidesService {
     });
 
     if (updates.isActive) {
-      await this.materializeRecurringRides(1).catch(() => {});
+      await this.materializeRecurringRides(7).catch(() => {});
     }
 
     return updated;
@@ -1665,8 +1668,6 @@ export class RidesService {
 
         // Parse timeOfDay "HH:MM"
         const [hoursStr, minutesStr] = schedule.timeOfDay.split(':');
-        const hours = parseInt(hoursStr, 10);
-        const minutes = parseInt(minutesStr, 10);
 
         // Construct start and end times in local time (+05:30)
         const year = targetDate.getFullYear();
@@ -1718,7 +1719,7 @@ export class RidesService {
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async handleDailyRecurringRideCron() {
     this.logger.log('Running nightly recurring ride materialization cron job...');
-    const result = await this.materializeRecurringRides(1);
+    const result = await this.materializeRecurringRides(7);
     this.logger.log(`Nightly cron finished: ${result.createdCount} rides materialized.`);
   }
 }
