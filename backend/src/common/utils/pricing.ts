@@ -44,33 +44,18 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
   const distanceKm = Math.max(0, input.distanceMeters / 1000);
   const deviationKm = Math.max(0, input.deviationMeters / 1000);
 
-  // 1. Detect Premium NCR Location Zones
-  const isPremiumLocation = (name: string): boolean => {
-    const n = name.toLowerCase();
-    return (
-      n.includes('delhi') ||
-      n.includes('noida') ||
-      n.includes('gurgaon') ||
-      n.includes('faridabad') ||
-      n.includes('airport') ||
-      n.includes('station') ||
-      n.includes('cp') ||
-      n.includes('connaught place')
-    );
-  };
+  const isNcrPremium = false;
 
-  const isNcrPremium = isPremiumLocation(input.startPlaceName) || isPremiumLocation(input.endPlaceName);
-
-  // 2. Pricing Matrix Variables based on Vehicle Class
-  let baseFare = 50.0;
-  let locationPremiumRate = 30.0;
+  // Pricing Matrix Variables based on Vehicle Class (Base fare & location premium removed per specification)
+  let baseFare = 0.0;
+  let locationPremiumRate = 0.0;
   let perKmRate = 10.0;
   let detourRate = 15.0;
   let fuelCostPerKm = 6.0; // Petrol standard
   
-  let cabBase = 150.0;
-  let cabPerKm = 18.0;
-  let minFloor = 50.0;
+  let cabBase = 50.0;
+  let cabPerKm = 15.0;
+  let minFloor = 20.0;
 
   const normalizedType = input.vehicleType?.toUpperCase() || 'CAR';
   const capacity = Number(input.vehicleCapacity) || 5;
@@ -78,22 +63,22 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
 
   if (normalizedType === 'BIKE') {
     // 2-Wheel Bike rates
-    baseFare = 20.0;
-    locationPremiumRate = 10.0;
+    baseFare = 0.0;
+    locationPremiumRate = 0.0;
     perKmRate = 4.0;
     detourRate = 5.0;
     fuelCostPerKm = 2.0; // Bikes are highly efficient
     
-    cabBase = 50.0;
-    cabPerKm = 8.0;
-    minFloor = 30.0;
+    cabBase = 30.0;
+    cabPerKm = 6.0;
+    minFloor = 15.0;
   } else if (normalizedType === 'CAR' && capacity > 5) {
     // 7-Seater Premium Car rates
-    baseFare = 70.0;
-    locationPremiumRate = 40.0;
+    baseFare = 0.0;
+    locationPremiumRate = 0.0;
     perKmRate = 12.0;
     detourRate = 20.0;
-    minFloor = 70.0;
+    minFloor = 30.0;
 
     // Fuel costs for large vehicles
     if (normalizedFuel === 'CNG') {
@@ -104,15 +89,15 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
       fuelCostPerKm = 7.0; // Petrol
     }
 
-    cabBase = 200.0;
-    cabPerKm = 22.0;
+    cabBase = 80.0;
+    cabPerKm = 18.0;
   } else {
     // 5-Seater standard Car rates
-    baseFare = 50.0;
-    locationPremiumRate = 30.0;
+    baseFare = 0.0;
+    locationPremiumRate = 0.0;
     perKmRate = 10.0;
     detourRate = 15.0;
-    minFloor = 50.0;
+    minFloor = 20.0;
 
     // Fuel costs for standard cars
     if (normalizedFuel === 'CNG') {
@@ -123,26 +108,37 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
       fuelCostPerKm = 6.0; // Petrol
     }
 
-    cabBase = 150.0;
-    cabPerKm = 18.0;
+    cabBase = 50.0;
+    cabPerKm = 15.0;
   }
 
-  // 3. Components Calculation
-  const locationPremium = isNcrPremium ? locationPremiumRate : 0.0;
+  // Components Calculation (Distance fare + Fuel surcharge + Detour surcharge)
+  const locationPremium = 0.0;
   const distanceFare = distanceKm * perKmRate;
   const fuelSurcharge = distanceKm * fuelCostPerKm;
   const deviationSurcharge = deviationKm * detourRate;
 
-  // 4. Subtotal & 40% Pooling Discount
-  const subtotal = baseFare + locationPremium + distanceFare + fuelSurcharge + deviationSurcharge;
+  const variableSubtotal = distanceFare + fuelSurcharge + deviationSurcharge + locationPremium;
+  const variablePooledFare = variableSubtotal * 0.60;
+
+  const targetMinFare = normalizedType === 'BIKE' ? 20.0 : 30.0;
+
+  // If variable pooled fare is less than minimum threshold, increase base fare to meet target minimum pooled fare exactly
+  baseFare = 0.0;
+  if (variablePooledFare < targetMinFare) {
+    baseFare = (targetMinFare / 0.60) - variableSubtotal;
+  }
+
+  // Subtotal & 40% Pooling Discount
+  const subtotal = baseFare + variableSubtotal;
   const poolingDiscount = subtotal * 0.40;
   const poolingFare = subtotal - poolingDiscount;
 
-  // 5. Cab Safety Surcharge Cap Slashes
+  // Cab Safety Surcharge Cap Slashes
   const cabCapFare = cabBase + distanceKm * cabPerKm;
 
-  // Final Fare is the minimum of pooling fare and private cab fare, bounded by a minimum floor
-  const finalFare = Math.max(minFloor, Math.min(poolingFare, cabCapFare));
+  // Final Fare is minimum of pooling fare and private cab fare, bounded by target minimum threshold
+  const finalFare = Math.max(targetMinFare, Math.min(poolingFare, cabCapFare));
 
   return {
     vehicleType: normalizedType,
@@ -150,9 +146,9 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
     fuelType: normalizedFuel,
     distanceKm: Number(distanceKm.toFixed(2)),
     deviationKm: Number(deviationKm.toFixed(2)),
-    isNcrPremium,
+    isNcrPremium: false,
     baseFare: Number(baseFare.toFixed(2)),
-    locationPremium: Number(locationPremium.toFixed(2)),
+    locationPremium: 0.0,
     distanceFare: Number(distanceFare.toFixed(2)),
     fuelSurcharge: Number(fuelSurcharge.toFixed(2)),
     deviationSurcharge: Number(deviationSurcharge.toFixed(2)),
@@ -160,6 +156,6 @@ export function calculateFare(input: FareCalculationInput): FareBreakdown {
     poolingDiscount: Number(poolingDiscount.toFixed(2)),
     poolingFare: Number(poolingFare.toFixed(2)),
     cabCapFare: Number(cabCapFare.toFixed(2)),
-    finalFare: Math.round(finalFare), // Round to nearest integer for clear rupee representation
+    finalFare: Math.round(finalFare),
   };
 }

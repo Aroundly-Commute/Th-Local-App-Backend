@@ -459,6 +459,7 @@ export class RidesService {
             CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."rating" ELSE u."rating" END as "rider_rating",
             CASE WHEN rr."requesterRideId" = ${id} THEN host_driver."gender" ELSE u."gender" END as "rider_gender",
             rr."status"::text,
+            rr."isInvitation" as "is_invitation",
             rr."otp" as "otp",
             rr."otpVerified" as "otp_verified",
             rr."fareCents",
@@ -496,6 +497,8 @@ export class RidesService {
       rider_rating: rr.rider_rating ?? 5.0,
       rider_gender: rr.rider_gender || null,
       status: rr.status,
+      is_invitation: Boolean((rr as any).is_invitation),
+      isInvitation: Boolean((rr as any).is_invitation),
       otp_verified: rr.otp_verified || false,
       chat_id: getDeterministicChatId(ride.driverId, rr.rider_id),
       fareCents: rr.fareCents,
@@ -529,7 +532,7 @@ export class RidesService {
       if (myRequest) {
         (ride as any).my_request_id = myRequest.id;
         (ride as any).my_request_status = myRequest.status;
-        (ride as any).my_request_is_invitation = (myRequest.riderId === userId) ? (myRequest.isInvitation || false) : false;
+        (ride as any).my_request_is_invitation = Boolean(myRequest.isInvitation);
         (ride as any).my_request_otp_verified = myRequest.otpVerified || false;
         (ride as any).my_chat_id = getDeterministicChatId(ride.driverId, userId);
         (ride as any).my_fare_cents = myRequest.fareCents;
@@ -615,6 +618,7 @@ export class RidesService {
       co2_saved_kg,
       my_review_rating,
       estimatedFare,
+      price_per_seat: estimatedFare ? estimatedFare.finalFare : (ride.chargeCents ? ride.chargeCents / 100 : 30),
       my_otp: otpRoleInfo.my_display_otp,
       peer_otp,
       can_enter_otp: otpRoleInfo.can_enter_otp,
@@ -1018,7 +1022,7 @@ export class RidesService {
 
     const isCab = r.vehicleType === 'CAB';
     const rawPrice = isConfirmed && acceptedReq ? (acceptedReq.fareCents ? acceptedReq.fareCents / 100 : r.chargeCents / 100) : r.chargeCents / 100;
-    const price_per_seat = (isSeeking || isCab) ? null : rawPrice;
+    const price_per_seat = rawPrice;
 
     const hostDriverId = r.driverId;
     const riderId = acceptedReq ? acceptedReq.riderId : (r.passengers?.[0]?.rider_id || '');
@@ -1084,11 +1088,25 @@ export class RidesService {
   }
 
   async offerRide(body: any, userId: string) {
-    const { startName, endName, startCoords, endCoords, seats, price, date, time, vehicleType: bodyVehicleType } = body;
-    const startTime = new Date(`${date}T${time}:00+05:30`);
+    const { startName: rawStartName, endName: rawEndName, startPlaceName, endPlaceName, startCoords, endCoords, seats, price, date, time, startTime: rawStartTime, vehicleType: bodyVehicleType } = body;
+    const startName = rawStartName || startPlaceName || 'Pickup Location';
+    const endName = rawEndName || endPlaceName || 'Dropoff Location';
+
+    let startTime: Date;
+    if (rawStartTime && !isNaN(new Date(rawStartTime).getTime())) {
+      startTime = new Date(rawStartTime);
+    } else if (date && time && date !== 'undefined' && time !== 'undefined') {
+      startTime = new Date(`${date}T${time}:00+05:30`);
+    } else {
+      startTime = new Date(Date.now() + 15 * 60 * 1000);
+    }
+
+    if (isNaN(startTime.getTime())) {
+      startTime = new Date(Date.now() + 15 * 60 * 1000);
+    }
     const endTime = new Date(startTime.getTime() + 60 * 60 * 1000); // add 1 hr approx
 
-    console.log(`[OfferRide Service] Local Time: ${date} ${time} | Calculated UTC: ${startTime.toISOString()}`);
+    console.log(`[OfferRide Service] Location: ${startName} -> ${endName} | Calculated UTC: ${startTime.toISOString()}`);
 
     const rideId = generateDeterministicId('ride', [userId, startName, endName, startTime.toISOString()]);
 
@@ -1646,35 +1664,52 @@ export class RidesService {
 
     const createdRides: string[] = [];
     const now = new Date();
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + IST_OFFSET_MS);
 
     for (let i = 0; i < daysAhead; i++) {
-      const targetDate = new Date();
-      targetDate.setDate(now.getDate() + i);
-      const targetDayOfWeek = targetDate.getDay(); // 0-6
+      const targetIst = new Date(istNow.getTime() + i * 24 * 60 * 60 * 1000);
+      const year = targetIst.getUTCFullYear();
+      const month = String(targetIst.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(targetIst.getUTCDate()).padStart(2, '0');
+      const targetDayOfWeek = targetIst.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
+      const targetDateStr = `${year}-${month}-${day}`;
 
       for (const schedule of schedules) {
-        // Check if schedule is active
-        const startDate = new Date(schedule.startDate);
-        const endDate = schedule.endDate ? new Date(schedule.endDate) : null;
-        if (targetDate < startDate || (endDate && targetDate > endDate)) {
+        // Check if daysOfWeek matches
+        if (!schedule.daysOfWeek || !schedule.daysOfWeek.includes(targetDayOfWeek)) {
           continue;
         }
 
-        // Check if daysOfWeek matches
-        if (!schedule.daysOfWeek.includes(targetDayOfWeek)) {
-          continue;
+        // Check if schedule is active based on IST date string
+        if (schedule.startDate) {
+          const startDateIst = new Date(new Date(schedule.startDate).getTime() + IST_OFFSET_MS);
+          const startDateStr = `${startDateIst.getUTCFullYear()}-${String(startDateIst.getUTCMonth() + 1).padStart(2, '0')}-${String(startDateIst.getUTCDate()).padStart(2, '0')}`;
+          if (targetDateStr < startDateStr) {
+            continue;
+          }
+        }
+
+        if (schedule.endDate) {
+          const endDateIst = new Date(new Date(schedule.endDate).getTime() + IST_OFFSET_MS);
+          const endDateStr = `${endDateIst.getUTCFullYear()}-${String(endDateIst.getUTCMonth() + 1).padStart(2, '0')}-${String(endDateIst.getUTCDate()).padStart(2, '0')}`;
+          if (targetDateStr > endDateStr) {
+            continue;
+          }
         }
 
         // Parse timeOfDay "HH:MM"
         const [hoursStr, minutesStr] = schedule.timeOfDay.split(':');
 
         // Construct start and end times in local time (+05:30)
-        const year = targetDate.getFullYear();
-        const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-        const day = String(targetDate.getDate()).padStart(2, '0');
+        const startTime = new Date(`${targetDateStr}T${schedule.timeOfDay}:00+05:30`);
         
-        const startTime = new Date(`${year}-${month}-${day}T${schedule.timeOfDay}:00+05:30`);
-        const endTime = new Date(startTime.getTime() + schedule.durationMinutes * 60 * 1000);
+        // Skip rides that start in the past
+        if (startTime.getTime() < now.getTime()) {
+          continue;
+        }
+
+        const endTime = new Date(startTime.getTime() + (schedule.durationMinutes || 60) * 60 * 1000);
 
         // Deterministic ID to avoid duplicates
         const rideId = generateDeterministicId('ride', [
@@ -1715,7 +1750,7 @@ export class RidesService {
     };
   }
 
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { timeZone: 'Asia/Kolkata' })
   async handleDailyRecurringRideCron() {
     this.logger.log('Running nightly recurring ride materialization cron job...');
     const result = await this.materializeRecurringRides(7);

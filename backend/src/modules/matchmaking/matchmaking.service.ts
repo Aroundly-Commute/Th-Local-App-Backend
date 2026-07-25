@@ -1860,6 +1860,35 @@ export class MatchmakingService {
       }
     });
 
+    try {
+      const actorUser = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, name: true, profilePic: true }
+      });
+
+      const payloadData = {
+        ...updated,
+        rideId: req.rideId,
+        requestId: req.id,
+        otpVerified: true,
+        peerUser: actorUser
+      };
+
+      const recipientIds = Array.from(new Set([hostDriverId, requesterId].filter((id): id is string => Boolean(id) && id !== userId)));
+      for (const recipientId of recipientIds) {
+        this.gateway.notifyUser(recipientId, 'otp_verified', payloadData);
+        await this.chatService.sendNotificationToUser(
+          recipientId,
+          'OTP Verified 🔑',
+          `OTP verified successfully by ${actorUser?.name || 'co-passenger'}.`,
+          'otp_verified',
+          payloadData
+        );
+      }
+    } catch (e) {
+      console.error('Failed to send OTP verification notification:', e);
+    }
+
     return {
       ...updated,
       otpVerified: true,
@@ -1914,6 +1943,35 @@ export class MatchmakingService {
       where: { id: { in: linkedRideIds } },
       data: { status: RideStatus.STARTED }
     });
+
+    try {
+      const actorUser = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, name: true, profilePic: true }
+      });
+
+      const payloadData = {
+        ...updated,
+        rideId: req.rideId,
+        requestId: req.id,
+        status: 'STARTED',
+        peerUser: actorUser
+      };
+
+      const recipientIds = Array.from(new Set([req.ride.driverId, req.riderId].filter((id): id is string => Boolean(id) && id !== userId)));
+      for (const recipientId of recipientIds) {
+        this.gateway.notifyUser(recipientId, 'ride_started', payloadData);
+        await this.chatService.sendNotificationToUser(
+          recipientId,
+          'Ride Started 🚀',
+          `Your ride with ${actorUser?.name || 'co-passenger'} has officially started.`,
+          'ride_started',
+          payloadData
+        );
+      }
+    } catch (e) {
+      console.error('Failed to send ride started notification:', e);
+    }
 
     const peerId = (userId === req.ride.driverId) ? req.riderId : req.ride.driverId;
     if (peerId) {
@@ -1988,9 +2046,13 @@ export class MatchmakingService {
 
     let riderShare = 0;
     let driverShare = 0;
+    const finalFareAmount = (actualFare && actualFare > 0) 
+      ? actualFare 
+      : (req.ride.chargeCents ? req.ride.chargeCents / 100 : (req.fareCents ? req.fareCents / 100 : 0));
 
     if (req.ride.vehicleType === 'CAB') {
-      if (!actualFare || actualFare <= 0) {
+      const fareToSplit = finalFareAmount;
+      if (fareToSplit <= 0) {
         throw new BadRequestException('Cab amount is required to complete cab sharing ride');
       }
 
@@ -2012,11 +2074,11 @@ export class MatchmakingService {
 
       const totalDist = d_ride + d_rider;
       if (totalDist > 0) {
-        riderShare = Math.round((actualFare * d_rider) / totalDist * 100) / 100;
-        driverShare = Math.round((actualFare * d_ride) / totalDist * 100) / 100;
+        riderShare = Math.round((fareToSplit * d_rider) / totalDist * 100) / 100;
+        driverShare = Math.round((fareToSplit * d_ride) / totalDist * 100) / 100;
       } else {
-        riderShare = actualFare / 2;
-        driverShare = actualFare / 2;
+        riderShare = fareToSplit / 2;
+        driverShare = fareToSplit / 2;
       }
     }
 
@@ -2025,7 +2087,7 @@ export class MatchmakingService {
       data: {
         status: RideStatus.COMPLETED,
         completedAt: new Date(),
-        actualFare: actualFare || null,
+        actualFare: finalFareAmount > 0 ? finalFareAmount : null,
         riderShare: riderShare || null,
         driverShare: driverShare || null
       },
@@ -2048,16 +2110,25 @@ export class MatchmakingService {
           where: { id: userId },
           select: { id: true, name: true, profilePic: true, rating: true }
         });
+        const isCabShare = req.ride.vehicleType === 'CAB';
         const payloadData = {
           ...updated,
           peerUser: actorUser,
-          actualFare: actualFare || null
+          actualFare: finalFareAmount,
+          isCabShare,
+          riderShare,
+          driverShare
         };
         this.gateway.notifyUser(peerId, 'ride_completed', payloadData);
+        
+        const notifyMsg = isCabShare
+          ? `Your cab share with ${actorUser?.name || 'co-passenger'} is complete! Total cab fare: ₹${finalFareAmount}. Please split the bill.`
+          : `Your ride with ${actorUser?.name || 'co-passenger'} has been completed! Actual fare: ₹${finalFareAmount}.`;
+
         await this.chatService.sendNotificationToUser(
           peerId,
           'Ride Completed 🏁',
-          `Your ride with ${actorUser?.name || 'co-passenger'} has been completed!`,
+          notifyMsg,
           'ride_completed',
           payloadData
         );
