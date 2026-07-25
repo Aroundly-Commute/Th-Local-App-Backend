@@ -1,11 +1,11 @@
 -- AlterTable
-ALTER TABLE "Message" ADD COLUMN     "status" TEXT NOT NULL DEFAULT 'SENT';
+ALTER TABLE "Message" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'SENT';
 
 -- AlterTable
-ALTER TABLE "User" ADD COLUMN     "fcmToken" TEXT;
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "fcmToken" TEXT;
 
 -- CreateTable
-CREATE TABLE "PendingNotification" (
+CREATE TABLE IF NOT EXISTS "PendingNotification" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "type" TEXT NOT NULL,
@@ -16,4 +16,4 @@ CREATE TABLE "PendingNotification" (
 );
 
 -- CreateIndex
-CREATE INDEX "PendingNotification_userId_idx" ON "PendingNotification"("userId");
+CREATE INDEX IF NOT EXISTS "PendingNotification_userId_idx" ON "PendingNotification"("userId");

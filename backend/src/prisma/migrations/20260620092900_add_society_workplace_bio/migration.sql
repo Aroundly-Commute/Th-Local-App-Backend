@@ -1,4 +1,4 @@
 -- AlterTable
-ALTER TABLE "User" ADD COLUMN     "bio" TEXT,
-ADD COLUMN     "society" TEXT,
-ADD COLUMN     "workplace" TEXT;
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "bio" TEXT,
+ADD COLUMN IF NOT EXISTS "society" TEXT,
+ADD COLUMN IF NOT EXISTS "workplace" TEXT;

@@ -1,2 +1,2 @@
 -- AlterTable
-ALTER TABLE "BuddyRequest" ADD COLUMN "type" TEXT NOT NULL DEFAULT 'buddy';
+ALTER TABLE "BuddyRequest" ADD COLUMN IF NOT EXISTS "type" TEXT NOT NULL DEFAULT 'buddy';

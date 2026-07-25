@@ -1,16 +1,16 @@
 -- AlterTable
 ALTER TABLE "Ride" 
-ADD COLUMN "vehicleType" TEXT NOT NULL DEFAULT 'CAR',
-ADD COLUMN "vehicleCapacity" INTEGER NOT NULL DEFAULT 5,
-ADD COLUMN "fuelType" TEXT NOT NULL DEFAULT 'Petrol',
-ADD COLUMN "vehicleNumber" TEXT NOT NULL DEFAULT '';
+ADD COLUMN IF NOT EXISTS "vehicleType" TEXT NOT NULL DEFAULT 'CAR',
+ADD COLUMN IF NOT EXISTS "vehicleCapacity" INTEGER NOT NULL DEFAULT 5,
+ADD COLUMN IF NOT EXISTS "fuelType" TEXT NOT NULL DEFAULT 'Petrol',
+ADD COLUMN IF NOT EXISTS "vehicleNumber" TEXT NOT NULL DEFAULT '';
 
 -- AlterTable
 ALTER TABLE "RideRequest" 
-ADD COLUMN "fareCents" INTEGER NOT NULL DEFAULT 1000;
+ADD COLUMN IF NOT EXISTS "fareCents" INTEGER NOT NULL DEFAULT 1000;
 
 -- CreateTable
-CREATE TABLE "Vehicle" (
+CREATE TABLE IF NOT EXISTS "Vehicle" (
     "id" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -24,7 +24,11 @@ CREATE TABLE "Vehicle" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Vehicle_userId_key" ON "Vehicle"("userId");
+CREATE UNIQUE INDEX IF NOT EXISTS "Vehicle_userId_key" ON "Vehicle"("userId");
 
 -- AddForeignKey
-ALTER TABLE "Vehicle" ADD CONSTRAINT "Vehicle_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Vehicle_userId_fkey') THEN
+        ALTER TABLE "Vehicle" ADD CONSTRAINT "Vehicle_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+    END IF;
+END $$;
