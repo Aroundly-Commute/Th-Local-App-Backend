@@ -291,6 +291,9 @@ export class RidesService {
         startPlaceName: string;
         endPlaceName: string;
         status: RideStatus;
+        vehicleType: string;
+        vehicleCapacity: number;
+        fuelType: string;
         startPointGeoJson: string;
         endPointGeoJson: string;
         distanceMeters: number | null;
@@ -300,6 +303,7 @@ export class RidesService {
         r."id", u."name" as "driverName", u."profilePic" as "driverAvatar", u."gender" as "driverGender", u."rating" as "driverRating",
         r."seatsAvailable", r."chargeCents", r."startTime", r."endTime",
         r."startPlaceName", r."endPlaceName", r."status",
+        r."vehicleType", r."vehicleCapacity", r."fuelType",
         ST_AsGeoJSON(r."startPoint") as "startPointGeoJson",
         ST_AsGeoJSON(r."endPoint") as "endPointGeoJson",
         ST_Distance(r."startPoint"::geography, r."endPoint"::geography) as "distanceMeters"
@@ -311,14 +315,30 @@ export class RidesService {
       ${offsetClause}
     `);
 
+    const { calculateFare } = require('../../common/utils/pricing');
+
     return rides.map(ride => {
       const distanceMeters = Number(ride.distanceMeters || 0);
       const distance_km = distanceMeters / 1000.0;
       const co2_saved_kg = distance_km * 0.12;
+      const estimatedFare = calculateFare({
+        distanceMeters,
+        deviationMeters: 0,
+        startPlaceName: ride.startPlaceName,
+        endPlaceName: ride.endPlaceName,
+        vehicleType: (ride as any).vehicleType || 'CAR',
+        vehicleCapacity: (ride as any).vehicleCapacity || 5,
+        fuelType: (ride as any).fuelType || 'Petrol',
+      });
+      const computedFare = estimatedFare ? estimatedFare.finalFare : (ride.chargeCents ? ride.chargeCents / 100 : 30);
+      const finalPrice = (ride.chargeCents && ride.chargeCents !== 1000) ? (ride.chargeCents / 100) : computedFare;
       return {
         ...ride,
         distance_km,
         co2_saved_kg,
+        estimatedFare,
+        price_per_seat: Math.round(finalPrice),
+        chargeCents: Math.round(finalPrice * 100),
       };
     });
   }
@@ -1563,7 +1583,7 @@ export class RidesService {
         "startPlaceName", "endPlaceName", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
         "startPoint", "endPoint", "routeLine"
       ) VALUES (
-        ${id}, NOW(), ${driverId}, ${dto.seatsAvailable}, ${dto.chargeCents},
+        ${id}, NOW(), ${driverId}, ${dto.seatsAvailable}, ${dto.chargeCents || 1000},
         ${dto.daysOfWeek}, ${dto.timeOfDay}, ${dto.durationMinutes || 60}, ${new Date(dto.startDate)}, ${dto.endDate ? new Date(dto.endDate) : null},
         ${dto.startPlaceName}, ${dto.endPlaceName}, ${vehicleType}, ${vehicleCapacity}, ${fuelType}, ${vehicleNumber},
         ST_SetSRID(ST_GeomFromText(${startWkt}), 4326),
@@ -1571,6 +1591,32 @@ export class RidesService {
         ST_SetSRID(ST_GeomFromText(${routeWkt}), 4326)
       )
     `);
+
+    // Calculate distance and update chargeCents if default (1000) or missing
+    if (!dto.chargeCents || dto.chargeCents === 1000) {
+      const distRows = await this.prisma.$queryRaw<Array<{ distance: number }>>(Prisma.sql`
+        SELECT ST_Distance("startPoint"::geography, "endPoint"::geography) as distance
+        FROM "RecurringRideSchedule"
+        WHERE id = ${id}
+      `);
+      if (distRows && distRows.length > 0) {
+        const { calculateFare } = require('../../common/utils/pricing');
+        const fareInfo = calculateFare({
+          distanceMeters: distRows[0].distance,
+          deviationMeters: 0,
+          startPlaceName: dto.startPlaceName,
+          endPlaceName: dto.endPlaceName,
+          vehicleType,
+          vehicleCapacity,
+          fuelType
+        });
+        await this.prisma.$executeRaw(Prisma.sql`
+          UPDATE "RecurringRideSchedule"
+          SET "chargeCents" = ${Math.round(fareInfo.finalFare * 100)}
+          WHERE id = ${id}
+        `).catch(() => {});
+      }
+    }
 
     const result = await this.prisma.$queryRaw<any[]>(Prisma.sql`
       SELECT 
@@ -1725,13 +1771,33 @@ export class RidesService {
         });
 
         if (!existingRide) {
+          let chargeCentsToUse = schedule.chargeCents;
+          if (!chargeCentsToUse || chargeCentsToUse === 1000) {
+            const distRows = await this.prisma.$queryRaw<Array<{ distance: number }>>(Prisma.sql`
+              SELECT ST_Distance(ST_SetSRID(ST_GeomFromText(${schedule.startPointWkt}), 4326)::geography, ST_SetSRID(ST_GeomFromText(${schedule.endPointWkt}), 4326)::geography) as distance
+            `);
+            if (distRows && distRows.length > 0 && distRows[0].distance > 0) {
+              const { calculateFare } = require('../../common/utils/pricing');
+              const fareInfo = calculateFare({
+                distanceMeters: distRows[0].distance,
+                deviationMeters: 0,
+                startPlaceName: schedule.startPlaceName,
+                endPlaceName: schedule.endPlaceName,
+                vehicleType: schedule.vehicleType || 'CAR',
+                vehicleCapacity: schedule.vehicleCapacity || 5,
+                fuelType: schedule.fuelType || 'Petrol'
+              });
+              chargeCentsToUse = Math.round(fareInfo.finalFare * 100);
+            }
+          }
+
           await this.prisma.$executeRaw(Prisma.sql`
             INSERT INTO "Ride" (
               "id", "updatedAt", "driverId", "seatsAvailable", "chargeCents", "startTime", "endTime",
               "startPlaceName", "endPlaceName", "status", "vehicleType", "vehicleCapacity", "fuelType", "vehicleNumber",
               "startPoint", "endPoint", "routeLine"
             ) VALUES (
-              ${rideId}, NOW(), ${schedule.driverId}, ${schedule.seatsAvailable}, ${schedule.chargeCents}, ${startTime}, ${endTime},
+              ${rideId}, NOW(), ${schedule.driverId}, ${schedule.seatsAvailable}, ${chargeCentsToUse}, ${startTime}, ${endTime},
               ${schedule.startPlaceName}, ${schedule.endPlaceName}, 'OPEN'::"RideStatus", ${schedule.vehicleType}, ${schedule.vehicleCapacity}, ${schedule.fuelType}, ${schedule.vehicleNumber},
               ST_SetSRID(ST_GeomFromText(${schedule.startPointWkt}), 4326),
               ST_SetSRID(ST_GeomFromText(${schedule.endPointWkt}), 4326),
