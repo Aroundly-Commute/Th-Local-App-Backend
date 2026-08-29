@@ -73,7 +73,11 @@ async function bootstrap() {
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
   app.setGlobalPrefix('api', {
-    exclude: ['parking/ticket/:id'],
+    exclude: [
+      'parking/ticket/:id',
+      'whatsapp/(.*)',
+      'whatsapp',
+    ],
   });
 
   app.use(json({ limit: '50mb' }));

@@ -3,7 +3,7 @@ import { Response } from 'express';
 import { WhatsAppBotService } from './whatsapp-bot.service';
 import { WhatsAppService } from './whatsapp.service';
 
-@Controller('whatsapp')
+@Controller(['whatsapp', 'api/whatsapp'])
 export class WhatsAppController {
   private readonly logger = new Logger(WhatsAppController.name);
 
