@@ -13,6 +13,7 @@ import { ChatModule } from './modules/chat/chat.module';
 import { SavedPlacesModule } from './modules/saved-places/saved-places.module';
 import { VerificationModule } from './modules/verification/verification.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
+import { WhatsAppModule } from './modules/whatsapp/whatsapp.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -31,6 +32,7 @@ import { AppController } from './app.controller';
     SavedPlacesModule,
     VerificationModule,
     ReviewsModule,
+    WhatsAppModule,
   ],
   controllers: [AppController],
 })

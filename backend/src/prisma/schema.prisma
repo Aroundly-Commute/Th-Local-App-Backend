@@ -363,3 +363,15 @@ model RecurringRideSchedule {
   @@index([driverId])
 }
 
+model WhatsAppSession {
+  id           String   @id @default(uuid())
+  phoneNumber  String   @unique
+  userId       String?
+  step         String   @default("IDLE") // IDLE, SEARCH_ORIGIN, SEARCH_DEST, SEARCH_TIME, SELECTING_RIDE, OFFER_ORIGIN, OFFER_DEST, OFFER_TIME, OFFER_SEATS, OFFER_PRICE
+  payload      Json?    // Storing ongoing draft data like startPoint, endPoint, time, etc.
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([phoneNumber])
+}
+

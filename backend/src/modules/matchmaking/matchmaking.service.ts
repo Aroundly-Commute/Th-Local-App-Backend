@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Logger, Inject, Optional, forwardRef } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { randomUUID } from 'crypto';
 import { Prisma, RideStatus } from '@prisma/client';
@@ -8,8 +8,8 @@ import { pointWkt } from '../../common/utils/geo';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { ChatService } from '../chat/chat.service';
 import { generateDeterministicId } from '../../common/utils/id';
-
 import { MatchmakingGateway } from './matchmaking.gateway';
+import { WhatsAppService } from '../whatsapp/whatsapp.service';
 
 @Injectable()
 export class MatchmakingService {
@@ -19,6 +19,7 @@ export class MatchmakingService {
     private readonly prisma: PrismaService,
     private readonly gateway: MatchmakingGateway,
     private readonly chatService: ChatService,
+    @Optional() @Inject(forwardRef(() => WhatsAppService)) private readonly waService?: WhatsAppService,
   ) {}
 
   async search(dto: SearchMatchesDto, userId: string) {
@@ -993,6 +994,38 @@ export class MatchmakingService {
           'ride_request_updated',
           richUpdatedReq
         );
+      }
+
+      // WhatsApp Cross-Platform Notification Bridge
+      if (this.waService && req.riderId) {
+        const rider = await this.prisma.user.findUnique({
+          where: { id: req.riderId },
+          select: { phoneNumber: true, name: true },
+        });
+
+        if (rider?.phoneNumber) {
+          if (status === RideStatus.ACCEPTED) {
+            const otpStr = updateData.otp || req.otp || '';
+            const msg =
+              `🎉 *Booking Confirmed!*\n\n` +
+              `Driver *${actorUser?.name || 'Your driver'}* has accepted your ride request! 🚗\n\n` +
+              `🔑 *Your OTP:* *${otpStr}*\n` +
+              `📍 *Pickup:* ${req.riderStartName}\n` +
+              `🏁 *Drop:* ${req.riderEndName}\n\n` +
+              `Please share this OTP with the driver when you board. Have a safe journey!`;
+            this.waService.sendButtons(rider.phoneNumber, msg, [
+              { id: 'ACTION_MY_RIDES', title: '📋 My Bookings' },
+            ]).catch((err) => this.logger.warn(`WhatsApp dispatch error: ${err?.message}`));
+          } else if (status === RideStatus.REJECTED) {
+            const msg =
+              `⚠️ *Ride Update*\n\n` +
+              `Driver *${actorUser?.name || 'The driver'}* was unable to accept your request for *${req.riderStartName}* to *${req.riderEndName}*.\n\n` +
+              `Tap below to search for other available rides:`;
+            this.waService.sendButtons(rider.phoneNumber, msg, [
+              { id: 'ACTION_FIND_RIDE', title: '🔍 Find a Ride' },
+            ]).catch((err) => this.logger.warn(`WhatsApp dispatch error: ${err?.message}`));
+          }
+        }
       }
     } catch (e) {
       console.error('Failed to send status update notification:', e);
